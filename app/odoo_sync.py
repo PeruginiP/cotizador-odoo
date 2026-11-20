@@ -3,6 +3,7 @@ import time
 import os
 import json
 import threading
+import gc
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from app.database import replace_all_catalog, update_sync_status
@@ -17,7 +18,11 @@ def run_full_sync():
     username = os.getenv("ODOO_USER", "")
     password = os.getenv("ODOO_API_KEY", "")
 
-    update_sync_status("running", "Conectando con Odoo...")
+    def report(msg):
+        print(f"[{round(time.time() - t0, 1)}s] {msg}", flush=True)
+        update_sync_status("running", msg)
+
+    report("Conectando con Odoo...")
 
     try:
         common = xmlrpc.client.ServerProxy(f"{url}/xmlrpc/2/common", allow_none=True)
@@ -56,7 +61,7 @@ def run_full_sync():
             return resultados
 
         # 1. Monedas, listas de precios, categorías y almacenes
-        update_sync_status("running", "Descargando monedas, listas de precios y almacenes...")
+        report("Descargando monedas, listas de precios y almacenes...")
         currency_rows = []
         for comp in companies:
             comp_id = int(comp["id"])
@@ -184,7 +189,7 @@ def run_full_sync():
         )
 
         # 2. Stock disponible sin reservar (lot_stock_id) en TODOS los almacenes
-        update_sync_status("running", f"Calculando stock en {len(almacenes_info)} almacenes...")
+        report(f"Calculando stock en {len(almacenes_info)} almacenes...")
         warehouse_rows = []
         stock_rows = []
 
@@ -222,7 +227,7 @@ def run_full_sync():
 
         # 3. Productos en paralelo
         product_ids = execute_kw("product.product", "search", [[]], {"context": multi_ctx})
-        update_sync_status("running", f"Descargando {len(product_ids):,} productos en paralelo...")
+        report(f"Descargando {len(product_ids):,} productos en paralelo...")
 
         campos_lectura = [
             "default_code",
@@ -242,7 +247,7 @@ def run_full_sync():
         productos_raw = leer_en_paralelo("product.product", product_ids, campos_lectura)
 
         # 4. Impuestos por compañía y códigos de barra
-        update_sync_status("running", "Resolviendo impuestos por compañía y códigos de barra...")
+        report("Resolviendo impuestos por compañía y códigos de barra...")
         all_tax_ids = list({tid for p in productos_raw for tid in p.get("taxes_id", [])})
         taxes_records = leer_en_paralelo("account.tax", all_tax_ids, ["name", "company_id"], batch_size=5000)
         taxes_info_map = {}
@@ -258,7 +263,7 @@ def run_full_sync():
             barcodes_map = {b["id"]: str(b[barcode_code_field]) for b in bc_records if b.get(barcode_code_field)}
 
         # 5. Guardar todo en SQLite
-        update_sync_status("running", "Guardando índice y listas de precios en base local...")
+        report("Guardando índice y listas de precios en base local...")
         product_rows = []
         for p in productos_raw:
             pid = int(p["id"])
@@ -301,6 +306,11 @@ def run_full_sync():
                 estado,
             ))
 
+        del productos_raw
+        del taxes_records
+        del barcodes_map
+        gc.collect()
+
         replace_all_catalog(
             product_rows=product_rows,
             warehouse_rows=warehouse_rows,
@@ -319,4 +329,5 @@ def run_full_sync():
             total_products=len(product_rows),
         )
     except Exception as e:
+        print(f"[{round(time.time() - t0, 1)}s] ERROR: {e}", flush=True)
         update_sync_status("error", f"Error: {str(e)}")
