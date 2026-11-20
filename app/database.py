@@ -1,7 +1,12 @@
 import sqlite3
 import os
 import json
-from datetime import datetime, date
+from datetime import datetime, date, timezone, timedelta
+try:
+    from zoneinfo import ZoneInfo
+    AR_TZ = ZoneInfo("America/Argentina/Buenos_Aires")
+except Exception:
+    AR_TZ = timezone(timedelta(hours=-3))
 
 DB_PATH = os.getenv("DB_PATH", "/app/data/productos.db")
 
@@ -644,7 +649,7 @@ def log_quotation(username, company_id, order_id, order_name, customer_name, ite
                     customer_name, items_count, amount_total
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """, (
-                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                datetime.now(AR_TZ).strftime("%Y-%m-%d %H:%M:%S"),
                 username, company_id, order_id, order_name, customer_name,
                 items_count, amount_total
             ))

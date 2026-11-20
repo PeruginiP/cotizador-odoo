@@ -4,9 +4,15 @@ import os
 import json
 import threading
 import gc
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from app.database import replace_all_catalog, update_sync_status
+
+try:
+    from zoneinfo import ZoneInfo
+    AR_TZ = ZoneInfo("America/Argentina/Buenos_Aires")
+except Exception:
+    AR_TZ = timezone(timedelta(hours=-3))
 
 BATCH_SIZE = 2500
 MAX_WORKERS = 4
@@ -321,7 +327,7 @@ def run_full_sync():
             pricelist_item_rows=pricelist_item_rows,
         )
         elapsed = round(time.time() - t0, 1)
-        now_str = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+        now_str = datetime.now(AR_TZ).strftime("%d/%m/%Y %H:%M:%S")
         update_sync_status(
             "idle",
             f"Sincronizado en {elapsed}s ({len(pricelist_rows)} listas, {len(warehouse_rows)} alm.)",

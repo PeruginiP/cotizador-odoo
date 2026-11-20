@@ -1,6 +1,13 @@
 import xmlrpc.client
 import os
 from app.database import get_local_pricelists_for_company
+from datetime import datetime, timezone, timedelta
+
+try:
+    from zoneinfo import ZoneInfo
+    AR_TZ = ZoneInfo("America/Argentina/Buenos_Aires")
+except Exception:
+    AR_TZ = timezone(timedelta(hours=-3))
 
 def _get_odoo_service_connection():
     url = os.getenv("ODOO_URL", "").rstrip("/")
@@ -497,6 +504,16 @@ def search_quotations(query: str, company_id: int, allowed_company_ids: list, li
             "context": ctx,
         },
     )
+
+    for o in orders:
+        raw_dt = o.get("date_order")
+        if isinstance(raw_dt, str) and len(raw_dt) >= 19:
+            try:
+                dt_utc = datetime.strptime(raw_dt[:19], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+                o["date_order"] = dt_utc.astimezone(AR_TZ).strftime("%d/%m/%Y %H:%M")
+            except Exception:
+                pass
+
     return orders
 
 def get_quotation_details(order_id: int, company_id: int, allowed_company_ids: list):
