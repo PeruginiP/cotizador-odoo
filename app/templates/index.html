@@ -1012,6 +1012,27 @@
                 renderPartnerCard('invoice', bundle.default_invoice_partner || bundle.customer);
                 renderPartnerCard('shipping', bundle.default_delivery_partner || bundle.customer);
 
+                if (bundle.default_order_type && bundle.default_order_type.id) {
+                    const dt = bundle.default_order_type;
+                    if (!companyOrderTypes.some(t => t.id === dt.id)) {
+                        companyOrderTypes.push({
+                            id: dt.id,
+                            name: dt.name,
+                            default_route_id: dt.default_route_id || null
+                        });
+                    }
+                    if (!$(`#order-type-select option[value="${dt.id}"]`).length) {
+                        $('#order-type-select').append(
+                            `<option value="${dt.id}">${escapeHtml(dt.name)}</option>`
+                        );
+                    }
+                    if (dt.default_route_id && !$(`#route-select option[value="${dt.default_route_id}"]`).length) {
+                        $('#route-select').append(
+                            `<option value="${dt.default_route_id}">${escapeHtml(dt.default_route_name || ('Ruta #' + dt.default_route_id))}</option>`
+                        );
+                    }
+                }
+
                 if (bundle.default_order_type_id && $(`#order-type-select option[value="${bundle.default_order_type_id}"]`).length) {
                     $('#order-type-select').val(String(bundle.default_order_type_id));
                 } else {
@@ -1028,7 +1049,6 @@
                 $('#quote-alert').removeClass('d-none alert-success').addClass('alert-danger').text(msg);
             });
         }
-
         function selectPartnerForAddressSlot(slot, partnerId) {
             $(`#dropdown-${slot}`).addClass('d-none').empty();
             $.get(`/api/partners/${partnerId}/card`, { company_id: getSelectedCompanyId() }, function (cardData) {
@@ -1807,6 +1827,8 @@
         // --- OPCIONES Y ESTADO SYNC ---
         function loadQuotationOptions() {
             const companyId = getSelectedCompanyId();
+            const prevType = $('#order-type-select').val();
+            const prevRoute = $('#route-select').val();
             $('#pricelist-select').html('<option value="">Cargando...</option>');
             $('#order-type-select').html('<option value=""></option>');
             $('#route-select').html('<option value=""></option>');

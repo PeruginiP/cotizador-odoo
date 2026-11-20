@@ -56,6 +56,14 @@ def _extract_m2o_id(val):
         return int(val)
     return None
 
+def _make_company_context(active_company_id: int, allowed_company_ids: list) -> dict:
+    cid = int(active_company_id)
+    ordered = [cid] + [int(x) for x in (allowed_company_ids or []) if int(x) != cid]
+    return {
+        "allowed_company_ids": ordered,
+        "company_id": cid,
+        "force_company": cid,
+    }
 
 def _format_partner_address(p: dict) -> dict:
     parts_line1 = [x for x in [p.get("street"), p.get("street2")] if x]
@@ -181,8 +189,8 @@ def authenticate_odoo_user(login: str, password: str):
 def get_quotation_options(company_id: int, allowed_company_ids: list):
     _, db, uid, password, models = _get_odoo_service_connection()
     hierarchy_ids = _get_company_hierarchy(models, db, uid, password, int(company_id), allowed_company_ids)
-    full_allowed = list(set(allowed_company_ids + hierarchy_ids))
-    ctx = {"allowed_company_ids": full_allowed, "company_id": int(company_id)}
+    full_allowed = list(dict.fromkeys([int(company_id)] + hierarchy_ids + [int(x) for x in allowed_company_ids]))
+    ctx = _make_company_context(int(company_id), full_allowed)
 
     so_fields = models.execute_kw(
         db, uid, password,
@@ -210,16 +218,24 @@ def get_quotation_options(company_id: int, allowed_company_ids: list):
         type_meta = models.execute_kw(
             db, uid, password,
             type_model, "fields_get",
-            [["route_id"]],
+            [["route_id", "company_id"]],
             {"attributes": ["type", "relation"]},
         )
         has_type_route = "route_id" in type_meta
+        if not route_model and has_type_route:
+            route_model = type_meta["route_id"].get("relation")
+
         t_fields = ["id", "name"] + (["route_id"] if has_type_route else [])
+        type_domain = (
+            [["|", ("company_id", "=", False), ("company_id", "in", hierarchy_ids)]]
+            if "company_id" in type_meta
+            else [[]]
+        )
 
         raw_types = models.execute_kw(
             db, uid, password,
             type_model, "search_read",
-            [["|", ("company_id", "=", False), ("company_id", "in", hierarchy_ids)]],
+            type_domain,
             {"fields": t_fields, "order": "id asc", "context": ctx},
         )
         for t in raw_types:
@@ -232,13 +248,15 @@ def get_quotation_options(company_id: int, allowed_company_ids: list):
                 "default_route_id": def_route_id,
             })
 
-    # 2. Rutas seleccionables en venta (más las rutas vinculadas a los tipos de pedido)
+    # 2. Rutas seleccionables en venta + rutas vinculadas explícitamente a sale.order.type.route_id
     routes = []
     if route_model:
         if linked_route_ids:
             route_domain = [
-                "|", ("sale_selectable", "=", True), ("id", "in", list(linked_route_ids)),
-                "|", ("company_id", "=", False), ("company_id", "in", hierarchy_ids),
+                "|",
+                "&", ("sale_selectable", "=", True),
+                     "|", ("company_id", "=", False), ("company_id", "in", hierarchy_ids),
+                ("id", "in", list(linked_route_ids)),
             ]
         else:
             route_domain = [
@@ -483,8 +501,8 @@ def get_single_partner_card(partner_id: int, company_id: int, allowed_company_id
 def get_customer_details(partner_id: int, company_id: int, allowed_company_ids: list, extra_address_ids: list = None):
     _, db, uid, password, models = _get_odoo_service_connection()
     hierarchy_ids = _get_company_hierarchy(models, db, uid, password, int(company_id), allowed_company_ids)
-    full_allowed = list(set(allowed_company_ids + hierarchy_ids))
-    ctx = {"allowed_company_ids": full_allowed, "company_id": int(company_id)}
+    full_allowed = list(dict.fromkeys([int(company_id)] + hierarchy_ids + [int(x) for x in allowed_company_ids]))
+    ctx = _make_company_context(int(company_id), full_allowed)
 
     code_fields = _get_partner_code_fields(models, db, uid, password)
     partner_meta = models.execute_kw(
@@ -494,6 +512,7 @@ def get_customer_details(partner_id: int, company_id: int, allowed_company_ids: 
         {"attributes": ["type", "relation"]},
     )
     has_sale_type = "sale_type" in partner_meta
+    sale_type_model = partner_meta.get("sale_type", {}).get("relation") or "sale.order.type"
 
     addr_fields = [
         "id", "name", "parent_id", "type", "street", "street2", "zip", "city",
@@ -514,13 +533,15 @@ def get_customer_details(partner_id: int, company_id: int, allowed_company_ids: 
     comm_id = _extract_m2o_id(main_p.get("commercial_partner_id")) or int(partner_id)
     candidate_pids = [int(partner_id)] + ([comm_id] if comm_id != int(partner_id) else [])
 
-    # 1. Resolver res.partner.sale_type recorriendo sucursal -> empresa padre -> contexto base
+    # 1. Resolver res.partner.sale_type cambiando allowed_company_ids[0] según la jerarquía
     default_order_type_id = _extract_m2o_id(main_p.get("sale_type")) if has_sale_type else None
+    resolved_type_ctx = ctx
+
     if has_sale_type and not default_order_type_id:
-        contexts_to_try = [{"allowed_company_ids": full_allowed, "company_id": cid} for cid in hierarchy_ids]
-        contexts_to_try.append({"allowed_company_ids": full_allowed})
+        company_order = list(dict.fromkeys(hierarchy_ids + full_allowed))
         for cand_pid in candidate_pids:
-            for test_ctx in contexts_to_try:
+            for cid in company_order:
+                test_ctx = _make_company_context(cid, full_allowed)
                 rec = models.execute_kw(
                     db, uid, password,
                     "res.partner", "read",
@@ -531,9 +552,41 @@ def get_customer_details(partner_id: int, company_id: int, allowed_company_ids: 
                     val = _extract_m2o_id(rec[0].get("sale_type"))
                     if val:
                         default_order_type_id = val
+                        resolved_type_ctx = test_ctx
                         break
             if default_order_type_id:
                 break
+
+    # Obtener metadatos del sale.order.type y su route_id para garantizar que el frontend los tenga
+    default_order_type = None
+    if default_order_type_id:
+        try:
+            t_meta = models.execute_kw(
+                db, uid, password,
+                sale_type_model, "fields_get",
+                [["route_id"]],
+                {"attributes": ["type", "relation"]},
+            )
+            t_read_fields = ["id", "name"] + (["route_id"] if "route_id" in t_meta else [])
+            t_recs = models.execute_kw(
+                db, uid, password,
+                sale_type_model, "read",
+                [[int(default_order_type_id)]],
+                {"fields": t_read_fields, "context": resolved_type_ctx},
+            )
+            if t_recs:
+                t_rec = t_recs[0]
+                r_raw = t_rec.get("route_id")
+                def_r_id = _extract_m2o_id(r_raw)
+                def_r_name = r_raw[1] if isinstance(r_raw, list) and len(r_raw) > 1 else ""
+                default_order_type = {
+                    "id": int(t_rec["id"]),
+                    "name": t_rec.get("name") or "",
+                    "default_route_id": def_r_id,
+                    "default_route_name": def_r_name,
+                }
+        except Exception:
+            pass
 
     # 2. Resolver lista de precios predeterminada del cliente en sucursal -> empresa padre
     default_pricelist_id = _extract_m2o_id(main_p.get("property_product_pricelist"))
@@ -766,7 +819,7 @@ def save_quotation(
     client_order_ref: str = "",
 ):
     url, db, uid, password, models = _get_odoo_service_connection()
-    ctx = {"allowed_company_ids": allowed_company_ids, "company_id": int(company_id)}
+    ctx = _make_company_context(int(company_id), allowed_company_ids)
 
     so_fields = models.execute_kw(
         db, uid, password,
