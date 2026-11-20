@@ -77,7 +77,7 @@ def run_full_sync():
                     resultados.extend(future.result())
             return resultados
 
-        report("Descargando monedas, listas de precios y almacenes...")
+        report("Descargando datos de cabecera...")
         currency_rows = []
         for comp in companies:
             comp_id = int(comp["id"])
@@ -203,7 +203,7 @@ def run_full_sync():
             {"fields": ["id", "name", "code", "company_id", "lot_stock_id"], "context": multi_ctx},
         )
 
-        report(f"Calculando stock en {len(almacenes_info)} almacenes...")
+        report(f"Descargando Stock Disponible...")
         warehouse_rows = []
         stock_rows = []
 
@@ -240,7 +240,7 @@ def run_full_sync():
                         stock_rows.append((prod_id, wh_id, free_qty))
 
         product_ids = execute_kw("product.product", "search", [[]], {"context": multi_ctx})
-        report(f"Descargando {len(product_ids):,} productos en paralelo...")
+        report(f"Descargando {len(product_ids):,} productos...")
 
         campos_lectura = [
             "default_code",
