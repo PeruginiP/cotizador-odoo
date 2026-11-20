@@ -173,6 +173,13 @@ def init_db():
             conn.execute("ALTER TABLE quotation_logs ADD COLUMN company_id INTEGER DEFAULT 0;")
     conn.close()
 
+def _safe_rollback(conn):
+    if conn.in_transaction:
+        try:
+            conn.execute("ROLLBACK;")
+        except Exception:
+            pass
+
 def replace_all_catalog(
     product_rows,
     warehouse_rows,
@@ -182,29 +189,14 @@ def replace_all_catalog(
     pricelist_rows=None,
     pricelist_item_rows=None,
 ):
-    # Ordenar por clave primaria acelera la inserción B-tree en SQLite
     product_rows.sort(key=lambda r: r[0])
     stock_rows.sort(key=lambda r: (r[0], r[1]))
 
     conn = get_conn()
-    conn.isolation_level = None  # Control explícito de transacciones para swap atómico
+    conn.isolation_level = None
     try:
-        # FASE 1: Volcar datos en tablas *_staging sin bloquear las tablas productivas
-        suffix = int(time.time())
+        # FASE 1: Cargar datos en tablas *_staging sin bloquear las tablas en vivo
         conn.execute("BEGIN;")
-        try:
-            conn.execute(f"CREATE INDEX idx_prod_code_{suffix} ON products_staging(default_code);")
-            conn.execute(f"CREATE INDEX idx_prod_name_{suffix} ON products_staging(name);")
-            conn.execute(f"CREATE INDEX idx_prod_barcode_{suffix} ON products_staging(barcode_ids);")
-            conn.execute(f"CREATE INDEX idx_prod_brand_{suffix} ON products_staging(brand);")
-            conn.execute(f"CREATE INDEX idx_wh_company_{suffix} ON warehouses_staging(company_id);")
-            conn.execute(f"CREATE INDEX idx_ps_wh_prod_{suffix} ON product_stock_staging(warehouse_id, product_id, free_qty);")
-            if pricelist_item_rows is not None:
-                conn.execute(f"CREATE INDEX idx_pli_pricelist_{suffix} ON pricelist_items_staging(pricelist_id);")
-            conn.execute("COMMIT;")
-        except Exception:
-            conn.execute("ROLLBACK;")
-            raise
         try:
             conn.execute("DROP TABLE IF EXISTS warehouses_staging;")
             conn.execute("""
@@ -217,7 +209,7 @@ def replace_all_catalog(
                 )
             """)
             conn.executemany("""
-                INSERT INTO warehouses_staging (id, name, code, company_id, company_name)
+                INSERT OR REPLACE INTO warehouses_staging (id, name, code, company_id, company_name)
                 VALUES (?, ?, ?, ?, ?)
             """, warehouse_rows)
 
@@ -239,7 +231,7 @@ def replace_all_catalog(
                 )
             """)
             conn.executemany("""
-                INSERT INTO products_staging (
+                INSERT OR REPLACE INTO products_staging (
                     id, default_code, name, list_price, standard_price,
                     product_tmpl_id, categ_id, currency_id,
                     taxes_json, brand, barcode_ids, estado
@@ -256,14 +248,14 @@ def replace_all_catalog(
                 )
             """)
             conn.executemany("""
-                INSERT INTO product_stock_staging (product_id, warehouse_id, free_qty)
+                INSERT OR REPLACE INTO product_stock_staging (product_id, warehouse_id, free_qty)
                 VALUES (?, ?, ?)
             """, stock_rows)
 
             if category_rows is not None:
                 conn.execute("DROP TABLE IF EXISTS product_categories_staging;")
                 conn.execute("CREATE TABLE product_categories_staging (id INTEGER PRIMARY KEY, parent_path TEXT DEFAULT '')")
-                conn.executemany("INSERT INTO product_categories_staging (id, parent_path) VALUES (?, ?)", category_rows)
+                conn.executemany("INSERT OR REPLACE INTO product_categories_staging (id, parent_path) VALUES (?, ?)", category_rows)
 
             if currency_rows is not None:
                 conn.execute("DROP TABLE IF EXISTS company_currencies_staging;")
@@ -279,7 +271,7 @@ def replace_all_catalog(
                     )
                 """)
                 conn.executemany("""
-                    INSERT INTO company_currencies_staging (company_id, currency_id, currency_name, currency_symbol, rate, is_base)
+                    INSERT OR REPLACE INTO company_currencies_staging (company_id, currency_id, currency_name, currency_symbol, rate, is_base)
                     VALUES (?, ?, ?, ?, ?, ?)
                 """, currency_rows)
 
@@ -295,7 +287,7 @@ def replace_all_catalog(
                     )
                 """)
                 conn.executemany("""
-                    INSERT INTO pricelists_staging (id, name, currency_id, company_id, sequence)
+                    INSERT OR REPLACE INTO pricelists_staging (id, name, currency_id, company_id, sequence)
                     VALUES (?, ?, ?, ?, ?)
                 """, pricelist_rows)
 
@@ -326,7 +318,7 @@ def replace_all_catalog(
                     )
                 """)
                 conn.executemany("""
-                    INSERT INTO pricelist_items_staging (
+                    INSERT OR REPLACE INTO pricelist_items_staging (
                         id, pricelist_id, applied_on, categ_id, product_tmpl_id, product_id,
                         min_quantity, date_start, date_end, compute_price, fixed_price,
                         percent_price, price_discount, price_surcharge, price_round,
@@ -336,23 +328,22 @@ def replace_all_catalog(
 
             conn.execute("COMMIT;")
         except Exception:
-            conn.execute("ROLLBACK;")
+            _safe_rollback(conn)
             raise
 
-        # FASE 2: Construir índices en bloque sobre *_staging (las tablas en vivo siguen 100% libres)
+        # FASE 2: Crear índices esenciales con nombre único sobre *_staging
+        suffix = int(time.time())
         conn.execute("BEGIN;")
         try:
-            conn.execute("CREATE INDEX idx_prod_code_stg ON products_staging(default_code);")
-            conn.execute("CREATE INDEX idx_prod_name_stg ON products_staging(name);")
-            conn.execute("CREATE INDEX idx_prod_barcode_stg ON products_staging(barcode_ids);")
-            conn.execute("CREATE INDEX idx_prod_brand_stg ON products_staging(brand);")
-            conn.execute("CREATE INDEX idx_wh_company_stg ON warehouses_staging(company_id);")
-            conn.execute("CREATE INDEX idx_ps_wh_prod_stg ON product_stock_staging(warehouse_id, product_id, free_qty);")
+            conn.execute(f"CREATE INDEX idx_prod_code_{suffix} ON products_staging(default_code);")
+            conn.execute(f"CREATE INDEX idx_prod_name_{suffix} ON products_staging(name);")
+            conn.execute(f"CREATE INDEX idx_wh_company_{suffix} ON warehouses_staging(company_id);")
+            conn.execute(f"CREATE INDEX idx_ps_wh_prod_{suffix} ON product_stock_staging(warehouse_id, product_id, free_qty);")
             if pricelist_item_rows is not None:
-                conn.execute("CREATE INDEX idx_pli_pricelist_stg ON pricelist_items_staging(pricelist_id);")
+                conn.execute(f"CREATE INDEX idx_pli_pricelist_{suffix} ON pricelist_items_staging(pricelist_id);")
             conn.execute("COMMIT;")
         except Exception:
-            conn.execute("ROLLBACK;")
+            _safe_rollback(conn)
             raise
 
         # FASE 3: Intercambio atómico instantáneo (< 5 ms)
@@ -385,14 +376,15 @@ def replace_all_catalog(
 
             conn.execute("COMMIT;")
         except Exception:
-            conn.execute("ROLLBACK;")
+            _safe_rollback(conn)
             raise
 
-        # Consolidar WAL de manera pasiva sin bloquear lectores
-        conn.execute("PRAGMA wal_checkpoint(PASSIVE);")
+        try:
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+        except Exception:
+            pass
     finally:
         conn.close()
-
 def get_all_warehouses():
     conn = get_conn()
     try:
