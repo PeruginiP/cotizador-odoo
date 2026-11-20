@@ -6,7 +6,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 from pydantic import BaseModel
-from typing import List
+from typing import List, Optional
 from dotenv import load_dotenv
 
 from app.database import (
@@ -16,7 +16,11 @@ from app.database import (
     log_quotation,
 )
 from app.odoo_sync import run_full_sync
-from app.odoo_client import search_customers, create_draft_quotation
+from app.odoo_client import (
+    search_customers,
+    create_draft_quotation,
+    get_quotation_options,
+)
 
 load_dotenv()
 
@@ -26,7 +30,6 @@ app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY, max_age=28800, http
 
 templates = Jinja2Templates(directory="app/templates")
 
-# Protección simple contra fuerza bruta en login
 login_attempts = {}
 
 @app.on_event("startup")
@@ -135,7 +138,14 @@ def api_trigger_sync(user: str = Depends(get_current_user)):
     thread.start()
     return JSONResponse({"ok": True, "message": "Sincronización iniciada en segundo plano."})
 
-# --- API DE CLIENTES Y COTIZACIONES ---
+# --- API DE OPCIONES, CLIENTES Y COTIZACIONES ---
+@app.get("/api/quotation-options")
+def api_quotation_options(user: str = Depends(get_current_user)):
+    try:
+        return JSONResponse(get_quotation_options())
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.get("/api/customers")
 def api_customers(q: str = "", user: str = Depends(get_current_user)):
     if len(q.strip()) < 2:
@@ -156,7 +166,8 @@ class QuotationLineIn(BaseModel):
 class QuotationCreateIn(BaseModel):
     partner_id: int
     customer_name: str
-    warehouse_id: int
+    type_id: Optional[int] = None
+    route_id: Optional[int] = None
     client_order_ref: str = ""
     lines: List[QuotationLineIn]
 
@@ -167,8 +178,9 @@ def api_create_quotation(payload: QuotationCreateIn, user: str = Depends(get_cur
     try:
         res = create_draft_quotation(
             partner_id=payload.partner_id,
-            warehouse_id=payload.warehouse_id,
             lines=[line.model_dump() for line in payload.lines],
+            type_id=payload.type_id,
+            route_id=payload.route_id,
             client_order_ref=payload.client_order_ref,
         )
         log_quotation(
@@ -176,7 +188,7 @@ def api_create_quotation(payload: QuotationCreateIn, user: str = Depends(get_cur
             order_id=res["order_id"],
             order_name=res["order_name"],
             customer_name=payload.customer_name,
-            warehouse_id=payload.warehouse_id,
+            warehouse_id=payload.type_id or 0,
             items_count=len(payload.lines),
             amount_total=res["amount_total"],
         )
