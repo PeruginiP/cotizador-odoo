@@ -76,6 +76,7 @@
         .product-cell:focus {
             background-color: #e7f1ff;
             border-color: #0d6efd !important;
+            box-shadow: 0 0 0 2px rgba(13, 110, 253, 0.25);
             outline: none;
         }
 
@@ -150,6 +151,19 @@
             text-decoration: underline;
             color: #015c61;
         }
+
+        /* Botón estilo Odoo (Púrpura) */
+        .btn-odoo-primary {
+            background-color: #714B67;
+            border-color: #714B67;
+            color: #fff;
+        }
+
+        .btn-odoo-primary:hover {
+            background-color: #5d3d54;
+            border-color: #5d3d54;
+            color: #fff;
+        }
     </style>
 </head>
 
@@ -218,7 +232,6 @@
                             </div>
                         </div>
                         <div class="col-12 col-sm-8 position-relative">
-                            <!-- Buscador cuando no hay cliente elegido o se quiere cambiar -->
                             <div id="customer-search-box">
                                 <input type="text" id="customer-search" class="form-control form-control-sm"
                                     placeholder="Escribir nombre, CUIT o código interno (mín. 2 letras)..."
@@ -226,7 +239,6 @@
                                 <div id="customer-dropdown" class="list-group customer-results shadow d-none"></div>
                             </div>
 
-                            <!-- Tarjeta visual estilo Odoo cuando el cliente ya fue seleccionado -->
                             <div id="customer-selected-card" class="odoo-customer-card d-none">
                                 <div class="d-flex justify-content-between align-items-start gap-2">
                                     <div>
@@ -279,8 +291,23 @@
                     </div>
                 </div>
 
-                <!-- COLUMNA DERECHA ODOO: TIPO PEDIDO, RUTA, OC, REFERENCIA -->
+                <!-- COLUMNA DERECHA ODOO: LISTA PRECIOS + MONEDA, TIPO PEDIDO, RUTA, OC, REFERENCIA -->
                 <div class="col-12 col-lg-5">
+                    <!-- LISTA DE PRECIOS Y MONEDA -->
+                    <div class="row mb-2 align-items-start">
+                        <div class="col-5 odoo-field-label pt-1">
+                            Lista de precios
+                        </div>
+                        <div class="col-7">
+                            <select id="pricelist-select" class="form-select form-select-sm"
+                                onchange="onPricelistChange(true)">
+                                <option value="">Cargando...</option>
+                            </select>
+                            <div id="pricelist-currency-info"
+                                class="mt-1 d-flex flex-wrap align-items-center gap-2 small"></div>
+                        </div>
+                    </div>
+
                     <div class="row mb-2 align-items-center">
                         <div class="col-5 odoo-field-label">Tipo de Pedido</div>
                         <div class="col-7">
@@ -322,7 +349,10 @@
         <div class="odoo-sheet p-2">
             <div class="d-flex justify-content-between align-items-center px-2 py-1 border-bottom mb-2">
                 <span class="fw-bold text-uppercase small text-secondary">Líneas del Pedido</span>
-                <span class="small text-muted">Arrastrá desde <strong>⠿</strong> para reordenar las líneas</span>
+                <span id="price-recalc-badge" class="badge bg-warning text-dark d-none">Recalculando precios de
+                    lista...</span>
+                <span class="small text-muted">Tabulador salta entre celdas • Arrastrá desde <strong>⠿</strong> para
+                    reordenar</span>
             </div>
 
             <div class="table-responsive">
@@ -333,10 +363,18 @@
             </div>
 
             <!-- CONTROLES ESTILO ODOO DEBAJO DE LA GRILLA -->
-            <div class="d-flex flex-wrap gap-3 px-2 py-1 mb-2">
-                <span class="odoo-link-btn" onclick="addEmptyProductRow(true)">+ Agregar un producto</span>
-                <span class="odoo-link-btn" onclick="addSectionRow()">+ Agregar una sección</span>
-                <span class="odoo-link-btn" onclick="addNoteRow()">+ Agregar una nota</span>
+            <div class="d-flex flex-wrap justify-content-between align-items-center px-2 py-1 mb-2 gap-2">
+                <div class="d-flex flex-wrap gap-3">
+                    <span class="odoo-link-btn" onclick="addEmptyProductRow(true)">+ Agregar un producto</span>
+                    <span class="odoo-link-btn" onclick="addSectionRow()">+ Agregar una sección</span>
+                    <span class="odoo-link-btn" onclick="addNoteRow()">+ Agregar una nota</span>
+                </div>
+                <div>
+                    <button type="button" class="btn btn-outline-secondary btn-sm fw-semibold"
+                        onclick="openDiscountWizard()">
+                        % Descuento
+                    </button>
+                </div>
             </div>
 
             <div class="d-flex flex-wrap justify-content-between align-items-center border-top pt-3 px-2 gap-3">
@@ -445,6 +483,99 @@
         </div>
     </div>
 
+    <!-- MODAL 3: ASISTENTE DE DESCUENTOS (ESTILO ODOO / ADHOC) -->
+    <div class="modal fade" id="discountWizardModal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content">
+                <div class="modal-header py-2">
+                    <h5 class="modal-title fw-bold">Descuento</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Cerrar"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="row g-3 align-items-start">
+                        <!-- Columna izquierda: Inputs de porcentaje triple o importe fijo -->
+                        <div class="col-6">
+                            <div id="disc-pct-inputs">
+                                <div class="row mb-2 align-items-center">
+                                    <label class="col-6 col-form-label col-form-label-sm fw-semibold">Desc. 1
+                                        (%)</label>
+                                    <div class="col-5">
+                                        <input type="number" step="0.01" min="0" max="100" id="disc-1"
+                                            class="form-control form-control-sm text-end" value="0"
+                                            oninput="recalcWizardDiscount()">
+                                    </div>
+                                    <div class="col-1 px-0 small text-muted">%</div>
+                                </div>
+                                <div class="row mb-2 align-items-center">
+                                    <label class="col-6 col-form-label col-form-label-sm fw-semibold">Desc. 2
+                                        (%)</label>
+                                    <div class="col-5">
+                                        <input type="number" step="0.01" min="0" max="100" id="disc-2"
+                                            class="form-control form-control-sm text-end" value="0"
+                                            oninput="recalcWizardDiscount()">
+                                    </div>
+                                    <div class="col-1 px-0 small text-muted">%</div>
+                                </div>
+                                <div class="row mb-2 align-items-center">
+                                    <label class="col-6 col-form-label col-form-label-sm fw-semibold">Desc. 3
+                                        (%)</label>
+                                    <div class="col-5">
+                                        <input type="number" step="0.01" min="0" max="100" id="disc-3"
+                                            class="form-control form-control-sm text-end" value="0"
+                                            oninput="recalcWizardDiscount()">
+                                    </div>
+                                    <div class="col-1 px-0 small text-muted">%</div>
+                                </div>
+                                <div class="row mt-3 pt-2 border-top align-items-center">
+                                    <span class="col-6 small text-muted fw-semibold">Descuento</span>
+                                    <span id="disc-effective-label" class="col-6 fw-bold text-dark">0%</span>
+                                </div>
+                            </div>
+
+                            <div id="disc-fixed-input" class="d-none">
+                                <label class="form-label small fw-semibold">Importe fijo (<span
+                                        id="disc-fixed-curr">$</span>)</label>
+                                <input type="number" step="0.01" min="0" id="disc-fixed-amount"
+                                    class="form-control form-control-sm text-end" value="0">
+                            </div>
+                        </div>
+
+                        <!-- Columna derecha: Radio buttons de aplicación -->
+                        <div class="col-6 border-start ps-3">
+                            <div class="form-check mb-2">
+                                <input class="form-check-input" type="radio" name="discountMode" id="mode-sol"
+                                    value="sol_discount" checked onchange="toggleDiscountMode()">
+                                <label class="form-check-label small fw-semibold" for="mode-sol">
+                                    En todas las líneas de la orden
+                                </label>
+                            </div>
+                            <div class="form-check mb-2">
+                                <input class="form-check-input" type="radio" name="discountMode" id="mode-global"
+                                    value="global_discount" onchange="toggleDiscountMode()">
+                                <label class="form-check-label small fw-semibold" for="mode-global">
+                                    Descuento global
+                                </label>
+                            </div>
+                            <div class="form-check">
+                                <input class="form-check-input" type="radio" name="discountMode" id="mode-fixed"
+                                    value="amount" onchange="toggleDiscountMode()">
+                                <label class="form-check-label small fw-semibold" for="mode-fixed">
+                                    Importe fijo
+                                </label>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer justify-content-start py-2">
+                    <button type="button" class="btn btn-odoo-primary btn-sm px-3 fw-semibold"
+                        onclick="applyDiscountWizard()">Aplicar</button>
+                    <button type="button" class="btn btn-light border btn-sm px-3"
+                        data-bs-dismiss="modal">Descartar</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
     <script src="https://cdn.datatables.net/1.13.8/js/jquery.dataTables.min.js"></script>
@@ -456,15 +587,17 @@
         let modalTable = null;
         let searchModal;
         let loadQuoteModal;
+        let discountModal;
         let activeRowIndex = 0;
         let customerTimer = null;
         let quoteSearchTimer = null;
         let selectedProductsMap = new Map();
 
-        // Estado del cliente y sus direcciones
         let customerAddresses = [];
+        let companyPricelists = [];
+        let baseCurrency = { id: 1, name: 'ARS', symbol: '$', rate: 1.0 };
+        let discountProduct = null;
 
-        // Estado de edición de cotización previa
         let editingOrderId = null;
         let editingOrderName = '';
         let originalLineIds = [];
@@ -499,16 +632,30 @@
             return allWarehouses.filter(w => parseInt(w.company_id) === compId);
         }
 
+        function getActivePricelist() {
+            const plId = parseInt($('#pricelist-select').val());
+            return companyPricelists.find(p => p.id === plId) || null;
+        }
+
+        function getActiveCurrencySymbol() {
+            const pl = getActivePricelist();
+            return pl ? pl.currency_symbol : (baseCurrency.symbol || '$');
+        }
+
         $(document).ready(function () {
             searchModal = new bootstrap.Modal(document.getElementById('productSearchModal'));
             loadQuoteModal = new bootstrap.Modal(document.getElementById('loadQuotationModal'));
+            discountModal = new bootstrap.Modal(document.getElementById('discountWizardModal'));
 
             document.getElementById('productSearchModal').addEventListener('shown.bs.modal', function () {
                 const input = $('#modal-products-table_filter input');
                 input.focus().select();
             });
 
-            // Habilitar Drag & Drop en la grilla de líneas
+            document.getElementById('discountWizardModal').addEventListener('shown.bs.modal', function () {
+                $('#disc-1').focus().select();
+            });
+
             Sortable.create(document.getElementById('quote-grid-body'), {
                 handle: '.drag-handle',
                 animation: 150,
@@ -541,6 +688,81 @@
             loadQuotationOptions();
             initModalDataTable();
             renderGrid();
+        }
+
+        // --- LISTA DE PRECIOS Y MONEDAS ---
+        function onPricelistChange(recalculateExistingRows = true) {
+            const pl = getActivePricelist();
+            const infoBox = $('#pricelist-currency-info').empty();
+
+            if (pl) {
+                let html = `<span class="badge bg-primary-subtle text-primary border border-primary-subtle">Moneda: ${escapeHtml(pl.currency_name)} (${escapeHtml(pl.currency_symbol)})</span>`;
+                if (pl.is_foreign) {
+                    html += `<span class="badge bg-light text-dark border">TC: 1 ${escapeHtml(pl.currency_name)} = ${pl.exchange_rate.toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 4 })} ${escapeHtml(baseCurrency.name)}</span>`;
+                }
+                infoBox.html(html);
+            }
+
+            if (recalculateExistingRows) {
+                recalculateGridPricesFromPricelist();
+            } else {
+                recalculateAllTotalsInPlace();
+            }
+        }
+
+        function recalculateGridPricesFromPricelist(specificIndices = null) {
+            const pl = getActivePricelist();
+            if (!pl) {
+                recalculateAllTotalsInPlace();
+                return;
+            }
+
+            const targetItems = [];
+            rows.forEach((r, idx) => {
+                if (specificIndices !== null && !specificIndices.includes(idx)) return;
+                if (r.row_type === 'product' && r.product_id !== null) {
+                    // Evitar pisar una línea de descuento global/importe fijo
+                    if (discountProduct && r.product_id === discountProduct.id) return;
+                    targetItems.push({ idx, product_id: r.product_id, qty: r.qty || 1 });
+                }
+            });
+
+            if (!targetItems.length) {
+                recalculateAllTotalsInPlace();
+                return;
+            }
+
+            $('#price-recalc-badge').removeClass('d-none');
+            const partnerId = $('#selected-partner-id').val();
+
+            $.ajax({
+                url: '/api/pricelist-prices',
+                method: 'POST',
+                contentType: 'application/json',
+                data: JSON.stringify({
+                    company_id: getSelectedCompanyId(),
+                    pricelist_id: pl.id,
+                    partner_id: partnerId ? parseInt(partnerId) : null,
+                    items: targetItems.map(x => ({ product_id: x.product_id, qty: x.qty }))
+                }),
+                success: function (res) {
+                    const priceMap = res.prices || {};
+                    targetItems.forEach(item => {
+                        const newPrice = priceMap[String(item.product_id)];
+                        if (newPrice !== undefined) {
+                            rows[item.idx].price_unit = parseFloat(newPrice);
+                            const inputEl = $(`#price-input-${item.idx}`);
+                            if (inputEl.length) {
+                                inputEl.val(rows[item.idx].price_unit);
+                            }
+                        }
+                    });
+                    recalculateAllTotalsInPlace();
+                },
+                complete: function () {
+                    $('#price-recalc-badge').addClass('d-none');
+                }
+            });
         }
 
         // --- GESTIÓN DE CLIENTE Y DIRECCIONES (ESTILO ODOO) ---
@@ -593,14 +815,14 @@
             }, 300);
         });
 
-        function loadCustomerAndAddresses(partnerId, preselectedInvoiceId = null, preselectedShippingId = null) {
+        function loadCustomerAndAddresses(partnerId, preselectedInvoiceId = null, preselectedShippingId = null, preselectedPricelistId = null) {
             $('#customer-dropdown').addClass('d-none').empty();
             $.get(`/api/customers/${partnerId}`, { company_id: getSelectedCompanyId() }, function (bundle) {
-                applyCustomerBundle(bundle, preselectedInvoiceId, preselectedShippingId);
+                applyCustomerBundle(bundle, preselectedInvoiceId, preselectedShippingId, preselectedPricelistId);
             });
         }
 
-        function applyCustomerBundle(bundle, preselectedInvoiceId = null, preselectedShippingId = null) {
+        function applyCustomerBundle(bundle, preselectedInvoiceId = null, preselectedShippingId = null, preselectedPricelistId = null) {
             const cust = bundle.customer;
             customerAddresses = bundle.addresses || [cust];
 
@@ -634,7 +856,6 @@
             $('#customer-search-box').addClass('d-none');
             $('#customer-selected-card').removeClass('d-none');
 
-            // Poblar selectores de Dirección de Factura y Entrega
             const invSel = $('#invoice-address-select').empty().prop('disabled', false);
             const shipSel = $('#shipping-address-select').empty().prop('disabled', false);
 
@@ -649,17 +870,20 @@
 
             updateAddressPreview('invoice');
             updateAddressPreview('shipping');
+
+            // Aplicar lista de precios predeterminada del cliente (si existe en la empresa)
+            const targetPl = preselectedPricelistId || bundle.default_pricelist_id;
+            if (targetPl && companyPricelists.some(p => p.id === parseInt(targetPl))) {
+                $('#pricelist-select').val(String(targetPl));
+                onPricelistChange(preselectedPricelistId === null);
+            }
         }
 
         function updateAddressPreview(kind) {
             const selId = parseInt(kind === 'invoice' ? $('#invoice-address-select').val() : $('#shipping-address-select').val());
             const previewEl = kind === 'invoice' ? $('#invoice-address-preview') : $('#shipping-address-preview');
             const found = customerAddresses.find(a => a.id === selId);
-            if (found) {
-                previewEl.text(found.address_text);
-            } else {
-                previewEl.text('');
-            }
+            previewEl.text(found ? found.address_text : '');
         }
 
         // --- DATATABLES BUSCADOR DE PRODUCTOS ---
@@ -677,7 +901,7 @@
                         <th>Código</th>
                         <th>Producto</th>
                         <th>Marca</th>
-                        <th class="text-end">Precio Lista</th>
+                        <th class="text-end">Precio Base</th>
                         <th>Impuestos</th>
                         <th>Cód. Barras</th>
                         <th>Estado</th>
@@ -828,6 +1052,8 @@
             if (!items.length) return;
 
             let targetIdx = activeRowIndex;
+            const insertedIndices = [];
+
             items.forEach((p, i) => {
                 const existingLineId = (i === 0 && rows[targetIdx]) ? rows[targetIdx].line_id : null;
                 const newRow = {
@@ -850,6 +1076,7 @@
                 } else {
                     rows.splice(targetIdx, 0, newRow);
                 }
+                insertedIndices.push(targetIdx);
                 targetIdx++;
             });
 
@@ -862,12 +1089,15 @@
             searchModal.hide();
             renderGrid();
 
+            // Calcular precio exacto de lista de precios seleccionada para los ítems recién insertados
+            recalculateGridPricesFromPricelist(insertedIndices);
+
             setTimeout(() => {
                 $(`#qty-input-${activeRowIndex}`).focus().select();
             }, 150);
         }
 
-        // --- FILAS DE PRODUCTO, SECCIÓN, NOTA Y REORDENAMIENTO ---
+        // --- FILAS DE PRODUCTO, SECCIÓN, NOTA Y ACTUALIZACIÓN SIN PERDER FOCO (TAB) ---
         function addEmptyProductRow(focusProduct = false) {
             rows.push(createEmptyProductRowObj());
             renderGrid();
@@ -877,7 +1107,6 @@
         }
 
         function addSectionRow() {
-            // Insertar antes de la última fila si está vacía
             const insertAt = (rows.length > 0 && rows[rows.length - 1].row_type === 'product' && rows[rows.length - 1].product_id === null)
                 ? rows.length - 1
                 : rows.length;
@@ -911,13 +1140,32 @@
             renderGrid();
         }
 
-        function updateGridField(idx, field, val) {
+        // Actualiza modelo y subtotales EN EL LUGAR sin destruir el DOM (mantiene el foco al presionar Tab)
+        function updateGridFieldInPlace(idx, field, val) {
             if (field === 'name') {
                 rows[idx].name = val;
-            } else {
-                rows[idx][field] = parseFloat(val) || 0;
-                renderGrid();
+                return;
             }
+            rows[idx][field] = parseFloat(val) || 0;
+            recalculateAllTotalsInPlace();
+        }
+
+        function recalculateAllTotalsInPlace() {
+            const sym = escapeHtml(getActiveCurrencySymbol());
+            let totalNet = 0;
+
+            rows.forEach((r, idx) => {
+                if (r.row_type === 'product' && r.product_id !== null) {
+                    const lineSubtotal = r.qty * r.price_unit * (1 - (r.discount / 100));
+                    totalNet += lineSubtotal;
+                    const cellEl = $(`#row-subtotal-${idx}`);
+                    if (cellEl.length) {
+                        cellEl.text(`${sym} ${lineSubtotal.toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`);
+                    }
+                }
+            });
+
+            $('#grid-subtotal').text(`${sym} ${totalNet.toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`);
         }
 
         function removeGridRow(idx) {
@@ -931,6 +1179,7 @@
         function renderGrid() {
             const compWarehouses = getCompanyWarehouses();
             const totalColsCount = 10 + compWarehouses.length;
+            const sym = escapeHtml(getActiveCurrencySymbol());
 
             let headHtml = `
                 <tr>
@@ -939,9 +1188,9 @@
                     <th style="min-width: 230px;">Detalle</th>
                     <th style="width: 120px;">Marca</th>
                     <th class="text-end" style="width: 80px;">Cantidad</th>
-                    <th class="text-end" style="width: 110px;">Precio</th>
+                    <th class="text-end" style="width: 110px;">Precio (${sym})</th>
                     <th class="text-end" style="width: 70px;">Dto %</th>
-                    <th class="text-end" style="width: 115px;">Subtotal</th>
+                    <th class="text-end" style="width: 120px;">Subtotal</th>
             `;
             compWarehouses.forEach(wh => {
                 headHtml += `<th class="text-end bg-info-subtle" style="width: 68px;" title="${escapeHtml(wh.name)}">${escapeHtml(wh.code)}</th>`;
@@ -957,17 +1206,18 @@
             let totalNet = 0;
 
             rows.forEach((r, idx) => {
+                // tabindex="-1" en botones auxiliares para que TAB salte directo entre celdas editables
                 const orderCell = `
                     <td class="text-center text-nowrap">
                         <span class="drag-handle me-1" title="Arrastrar para reordenar">⠿</span>
                         <span class="fw-bold text-muted me-1">${idx + 1}</span>
-                        <button type="button" class="btn btn-link btn-sm p-0 text-secondary text-decoration-none" onclick="moveRow(${idx}, -1)" title="Subir">↑</button>
-                        <button type="button" class="btn btn-link btn-sm p-0 text-secondary text-decoration-none" onclick="moveRow(${idx}, 1)" title="Bajar">↓</button>
+                        <button type="button" tabindex="-1" class="btn btn-link btn-sm p-0 text-secondary text-decoration-none" onclick="moveRow(${idx}, -1)" title="Subir">↑</button>
+                        <button type="button" tabindex="-1" class="btn btn-link btn-sm p-0 text-secondary text-decoration-none" onclick="moveRow(${idx}, 1)" title="Bajar">↓</button>
                     </td>
                 `;
                 const deleteCell = `
                     <td class="text-center">
-                        <button type="button" class="btn btn-outline-danger btn-sm py-0 px-1" onclick="removeGridRow(${idx})" title="Quitar fila">×</button>
+                        <button type="button" tabindex="-1" class="btn btn-outline-danger btn-sm py-0 px-1" onclick="removeGridRow(${idx})" title="Quitar fila">×</button>
                     </td>
                 `;
 
@@ -981,7 +1231,7 @@
                                     <input id="text-input-${idx}" type="text" class="form-control form-control-sm"
                                            value="${escapeHtml(r.name)}"
                                            placeholder="Nombre de la sección..."
-                                           onchange="updateGridField(${idx}, 'name', this.value)">
+                                           oninput="updateGridFieldInPlace(${idx}, 'name', this.value)">
                                 </div>
                             </td>
                             ${deleteCell}
@@ -1000,7 +1250,7 @@
                                     <input id="text-input-${idx}" type="text" class="form-control form-control-sm"
                                            value="${escapeHtml(r.name)}"
                                            placeholder="Texto de la nota..."
-                                           onchange="updateGridField(${idx}, 'name', this.value)">
+                                           oninput="updateGridFieldInPlace(${idx}, 'name', this.value)">
                                 </div>
                             </td>
                             ${deleteCell}
@@ -1009,14 +1259,13 @@
                     return;
                 }
 
-                // Fila normal de producto
                 const hasProd = r.product_id !== null;
                 const lineSubtotal = hasProd ? (r.qty * r.price_unit * (1 - (r.discount / 100))) : 0;
                 totalNet += lineSubtotal;
 
                 const prodDisplay = hasProd
                     ? `<div class="fw-bold text-primary">${escapeHtml(r.default_code)}</div>`
-                    : `<span class="text-muted small">Clic para buscar...</span>`;
+                    : `<span class="text-muted small">Clic o Enter...</span>`;
 
                 let stockCellsHtml = '';
                 let rowTotalStock = 0;
@@ -1050,29 +1299,29 @@
                                    value="${escapeHtml(r.name)}"
                                    placeholder="Detalle del producto..."
                                    ${hasProd ? '' : 'disabled'}
-                                   onchange="updateGridField(${idx}, 'name', this.value)">
+                                   oninput="updateGridFieldInPlace(${idx}, 'name', this.value)">
                         </td>
                         <td class="small fw-semibold text-secondary">${hasProd ? escapeHtml(r.brand) : '-'}</td>
                         <td>
                             <input id="qty-input-${idx}" type="number" step="1" min="0.01"
                                    class="form-control form-control-sm text-end"
                                    value="${r.qty}" ${hasProd ? '' : 'disabled'}
-                                   onchange="updateGridField(${idx}, 'qty', this.value)">
+                                   oninput="updateGridFieldInPlace(${idx}, 'qty', this.value)">
                         </td>
                         <td>
-                            <input type="number" step="0.01" min="0"
+                            <input id="price-input-${idx}" type="number" step="0.01"
                                    class="form-control form-control-sm text-end"
                                    value="${r.price_unit}" ${hasProd ? '' : 'disabled'}
-                                   onchange="updateGridField(${idx}, 'price_unit', this.value)">
+                                   oninput="updateGridFieldInPlace(${idx}, 'price_unit', this.value)">
                         </td>
                         <td>
-                            <input type="number" step="0.1" min="0" max="100"
+                            <input id="disc-input-${idx}" type="number" step="0.1" min="0" max="100"
                                    class="form-control form-control-sm text-end"
                                    value="${r.discount}" ${hasProd ? '' : 'disabled'}
-                                   onchange="updateGridField(${idx}, 'discount', this.value)">
+                                   oninput="updateGridFieldInPlace(${idx}, 'discount', this.value)">
                         </td>
-                        <td class="text-end fw-bold text-nowrap">
-                            $ ${lineSubtotal.toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                        <td id="row-subtotal-${idx}" class="text-end fw-bold text-nowrap">
+                            ${sym} ${lineSubtotal.toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                         </td>
                         ${stockCellsHtml}
                         ${totalStockCellHtml}
@@ -1081,7 +1330,7 @@
                 `);
             });
 
-            $('#grid-subtotal').text('$ ' + totalNet.toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
+            $('#grid-subtotal').text(`${sym} ${totalNet.toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`);
         }
 
         function escapeHtml(text) {
@@ -1090,6 +1339,120 @@
                 .replace(/</g, '&lt;')
                 .replace(/>/g, '&gt;')
                 .replace(/"/g, '&quot;');
+        }
+
+        // --- ASISTENTE DE DESCUENTOS (ESTILO ODOO / ADHOC) ---
+        function openDiscountWizard() {
+            const validProds = rows.filter(r => r.row_type === 'product' && r.product_id !== null);
+            if (!validProds.length) {
+                alert('Agregá al menos un producto en la grilla antes de aplicar un descuento.');
+                return;
+            }
+            $('#disc-1').val(0);
+            $('#disc-2').val(0);
+            $('#disc-3').val(0);
+            $('#disc-fixed-amount').val(0);
+            $('#disc-fixed-curr').text(getActiveCurrencySymbol());
+            $('#mode-sol').prop('checked', true);
+            toggleDiscountMode();
+            recalcWizardDiscount();
+            discountModal.show();
+        }
+
+        function toggleDiscountMode() {
+            const mode = $('input[name="discountMode"]:checked').val();
+            if (mode === 'amount') {
+                $('#disc-pct-inputs').addClass('d-none');
+                $('#disc-fixed-input').removeClass('d-none');
+                setTimeout(() => $('#disc-fixed-amount').focus().select(), 50);
+            } else {
+                $('#disc-fixed-input').addClass('d-none');
+                $('#disc-pct-inputs').removeClass('d-none');
+                setTimeout(() => $('#disc-1').focus().select(), 50);
+            }
+        }
+
+        function getWizardEffectiveDiscountPct() {
+            const d1 = Math.min(100, Math.max(0, parseFloat($('#disc-1').val()) || 0));
+            const d2 = Math.min(100, Math.max(0, parseFloat($('#disc-2').val()) || 0));
+            const d3 = Math.min(100, Math.max(0, parseFloat($('#disc-3').val()) || 0));
+            const factor = (1 - d1 / 100) * (1 - d2 / 100) * (1 - d3 / 100);
+            return Math.round((1 - factor) * 100 * 10000) / 10000;
+        }
+
+        function recalcWizardDiscount() {
+            const eff = getWizardEffectiveDiscountPct();
+            $('#disc-effective-label').text(`${eff.toLocaleString('es-AR', { maximumFractionDigits: 2 })}%`);
+        }
+
+        function applyDiscountWizard() {
+            const mode = $('input[name="discountMode"]:checked').val();
+
+            if (mode === 'sol_discount') {
+                const effPct = getWizardEffectiveDiscountPct();
+                rows.forEach(r => {
+                    if (r.row_type === 'product' && r.product_id !== null) {
+                        if (discountProduct && r.product_id === discountProduct.id) return;
+                        r.discount = effPct;
+                    }
+                });
+                discountModal.hide();
+                renderGrid();
+                return;
+            }
+
+            if (!discountProduct) {
+                alert('No se encontró un producto de descuento configurado en Odoo para líneas globales.');
+                return;
+            }
+
+            let discountAmount = 0;
+            let lineLabel = 'Descuento';
+
+            if (mode === 'global_discount') {
+                const effPct = getWizardEffectiveDiscountPct();
+                if (effPct <= 0) {
+                    discountModal.hide();
+                    return;
+                }
+                // Calcular subtotal actual de los productos (excluyendo líneas de descuento previas)
+                let currentSubtotal = 0;
+                rows.forEach(r => {
+                    if (r.row_type === 'product' && r.product_id !== null && r.product_id !== discountProduct.id) {
+                        currentSubtotal += r.qty * r.price_unit * (1 - (r.discount / 100));
+                    }
+                });
+                discountAmount = Math.round((currentSubtotal * effPct / 100) * 100) / 100;
+                lineLabel = `Descuento ${effPct.toLocaleString('es-AR', { maximumFractionDigits: 2 })}%`;
+            } else if (mode === 'amount') {
+                discountAmount = Math.round((parseFloat($('#disc-fixed-amount').val()) || 0) * 100) / 100;
+                if (discountAmount <= 0) {
+                    discountModal.hide();
+                    return;
+                }
+                lineLabel = 'Descuento';
+            }
+
+            // Insertar línea de descuento antes de la última fila vacía
+            const insertAt = (rows.length > 0 && rows[rows.length - 1].row_type === 'product' && rows[rows.length - 1].product_id === null)
+                ? rows.length - 1
+                : rows.length;
+
+            rows.splice(insertAt, 0, {
+                line_id: null,
+                row_type: 'product',
+                product_id: discountProduct.id,
+                default_code: discountProduct.default_code,
+                name: lineLabel,
+                brand: '-',
+                qty: 1,
+                price_unit: -Math.abs(discountAmount),
+                discount: 0,
+                stocks: {}
+            });
+
+            discountModal.hide();
+            renderGrid();
         }
 
         // --- LEVANTAR COTIZACIÓN PREVIA ---
@@ -1154,16 +1517,13 @@
                 $('#btn-send-odoo').text(`Guardar Cambios en ${data.order_name}`);
                 $('#quote-alert').addClass('d-none');
 
-                // Cargar cliente y direcciones exactas guardadas en la orden
-                applyCustomerBundle(data.customer_bundle, data.partner_invoice_id, data.partner_shipping_id);
+                applyCustomerBundle(data.customer_bundle, data.partner_invoice_id, data.partner_shipping_id, data.pricelist_id);
 
-                // Cargar campos de cabecera
                 $('#order-type-select').val(data.type_id || '');
                 $('#route-select').val(data.route_id || '');
                 $('#purchase-order-number').val(data.purchase_order_number || '');
                 $('#order-ref').val(data.client_order_ref || '');
 
-                // Cargar líneas (productos, secciones y notas)
                 rows = (data.lines || []).map(ln => {
                     if (ln.row_type === 'section' || ln.row_type === 'note') {
                         return {
@@ -1218,10 +1578,25 @@
         // --- OPCIONES Y ESTADO SYNC ---
         function loadQuotationOptions() {
             const companyId = getSelectedCompanyId();
+            $('#pricelist-select').html('<option value="">Cargando...</option>');
             $('#order-type-select').html('<option value="">Cargando...</option>');
             $('#route-select').html('<option value="">Cargando...</option>');
 
             $.get('/api/quotation-options', { company_id: companyId }, function (res) {
+                companyPricelists = res.pricelists || [];
+                baseCurrency = res.base_currency || { id: 1, name: 'ARS', symbol: '$', rate: 1.0 };
+                discountProduct = res.discount_product || null;
+
+                const plSel = $('#pricelist-select').empty();
+                if (!companyPricelists.length) {
+                    plSel.append('<option value="">-- Sin listas configuradas --</option>');
+                } else {
+                    companyPricelists.forEach(pl => {
+                        plSel.append(`<option value="${pl.id}">${escapeHtml(pl.name)} (${escapeHtml(pl.currency_name)})</option>`);
+                    });
+                }
+                onPricelistChange(false);
+
                 const typeSel = $('#order-type-select').empty();
                 typeSel.append('<option value="">-- Por defecto --</option>');
                 (res.order_types || []).forEach(t => {
@@ -1234,6 +1609,7 @@
                     routeSel.append(`<option value="${r.id}">${escapeHtml(r.name)}</option>`);
                 });
             }).fail(function () {
+                $('#pricelist-select').html('<option value="">Error al cargar</option>');
                 $('#order-type-select').html('<option value="">Error al cargar</option>');
                 $('#route-select').html('<option value="">Error al cargar</option>');
             });
@@ -1277,12 +1653,14 @@
             const partnerId = $('#selected-partner-id').val();
             const invoiceId = $('#invoice-address-select').val();
             const shippingId = $('#shipping-address-select').val();
+            const pricelistVal = $('#pricelist-select').val();
             const customerName = $('#cust-card-name').text();
             const typeVal = $('#order-type-select').val();
             const routeVal = $('#route-select').val();
             const poNumber = $('#purchase-order-number').val();
             const orderRef = $('#order-ref').val();
             const alertBox = $('#quote-alert');
+            const sym = escapeHtml(getActiveCurrencySymbol());
 
             const validLines = rows.filter(r =>
                 (r.row_type === 'product' && r.product_id !== null) ||
@@ -1313,6 +1691,7 @@
                     partner_id: parseInt(partnerId),
                     partner_invoice_id: invoiceId ? parseInt(invoiceId) : parseInt(partnerId),
                     partner_shipping_id: shippingId ? parseInt(shippingId) : parseInt(partnerId),
+                    pricelist_id: pricelistVal ? parseInt(pricelistVal) : null,
                     customer_name: customerName,
                     type_id: typeVal ? parseInt(typeVal) : null,
                     route_id: routeVal ? parseInt(routeVal) : null,
@@ -1323,7 +1702,7 @@
                 success: function (res) {
                     alertBox.removeClass('d-none alert-danger').addClass('alert-success').html(
                         `Cotización <strong>${res.order_name}</strong> ${res.action_label} con éxito en <strong>${escapeHtml(getSelectedCompanyName())}</strong> ` +
-                        `(Total c/imp: $ ${res.amount_total.toLocaleString('es-AR', { minimumFractionDigits: 2 })}). ` +
+                        `(Total c/imp: ${sym} ${res.amount_total.toLocaleString('es-AR', { minimumFractionDigits: 2 })}). ` +
                         `<a href="${res.odoo_link}" target="_blank" class="fw-bold">Abrir en Odoo →</a>`
                     );
                     exitEditModeUI();

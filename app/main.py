@@ -27,6 +27,7 @@ from app.odoo_client import (
     get_quotation_details,
     save_quotation,
     get_quotation_options,
+    compute_pricelist_prices,
 )
 
 load_dotenv()
@@ -173,12 +174,37 @@ def api_trigger_sync(user: dict = Depends(get_current_user)):
     thread.start()
     return JSONResponse({"ok": True, "message": "Sincronización iniciada en segundo plano."})
 
-# --- API DE OPCIONES, CLIENTES Y COTIZACIONES ---
+# --- API DE OPCIONES, PRECIOS DE LISTA, CLIENTES Y COTIZACIONES ---
 @app.get("/api/quotation-options")
 def api_quotation_options(company_id: int, user: dict = Depends(get_current_user)):
     allowed = validate_user_company(user, company_id)
     try:
         return JSONResponse(get_quotation_options(company_id, allowed))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+class PricelistItemIn(BaseModel):
+    product_id: int
+    qty: float = 1.0
+
+class PricelistComputeIn(BaseModel):
+    company_id: int
+    pricelist_id: int
+    partner_id: Optional[int] = None
+    items: List[PricelistItemIn]
+
+@app.post("/api/pricelist-prices")
+def api_pricelist_prices(payload: PricelistComputeIn, user: dict = Depends(get_current_user)):
+    allowed = validate_user_company(user, payload.company_id)
+    try:
+        prices = compute_pricelist_prices(
+            company_id=payload.company_id,
+            allowed_company_ids=allowed,
+            pricelist_id=payload.pricelist_id,
+            items=[it.model_dump() for it in payload.items],
+            partner_id=payload.partner_id,
+        )
+        return JSONResponse({"prices": prices})
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -216,7 +242,6 @@ def api_get_quotation(order_id: int, company_id: int, user: dict = Depends(get_c
     allowed = validate_user_company(user, company_id)
     try:
         q_data = get_quotation_details(order_id, company_id, allowed)
-        # Enriquecer cada producto con su código, marca y stock local desde SQLite
         prod_ids = [ln["product_id"] for ln in q_data["lines"] if ln.get("row_type") == "product" and ln.get("product_id")]
         local_prods = get_products_by_ids(prod_ids)
 
@@ -236,7 +261,7 @@ def api_get_quotation(order_id: int, company_id: int, user: dict = Depends(get_c
 
 class QuotationLineIn(BaseModel):
     line_id: Optional[int] = None
-    row_type: str = "product"  # 'product' | 'section' | 'note'
+    row_type: str = "product"
     product_id: Optional[int] = None
     name: str = ""
     qty: float = 1.0
@@ -250,6 +275,7 @@ class QuotationSaveIn(BaseModel):
     partner_id: int
     partner_invoice_id: Optional[int] = None
     partner_shipping_id: Optional[int] = None
+    pricelist_id: Optional[int] = None
     customer_name: str
     type_id: Optional[int] = None
     route_id: Optional[int] = None
@@ -278,6 +304,7 @@ def api_save_quotation(payload: QuotationSaveIn, user: dict = Depends(get_curren
             partner_shipping_id=payload.partner_shipping_id or payload.partner_id,
             lines=valid_lines,
             creator_user=user,
+            pricelist_id=payload.pricelist_id,
             order_id=payload.order_id,
             original_line_ids=payload.original_line_ids,
             type_id=payload.type_id,

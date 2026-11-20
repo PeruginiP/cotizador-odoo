@@ -147,6 +147,7 @@ def get_quotation_options(company_id: int, allowed_company_ids: list):
         {"attributes": ["type", "relation"]},
     )
 
+    # 1. Tipos de pedido
     order_types = []
     type_model = so_fields.get("type_id", {}).get("relation")
     if type_model:
@@ -157,6 +158,7 @@ def get_quotation_options(company_id: int, allowed_company_ids: list):
             {"fields": ["id", "name"], "order": "sequence asc, id asc", "context": ctx},
         )
 
+    # 2. Rutas seleccionables en venta
     routes = []
     route_model = (
         sol_fields.get("route_id", {}).get("relation")
@@ -173,7 +175,160 @@ def get_quotation_options(company_id: int, allowed_company_ids: list):
             {"fields": ["id", "name"], "order": "sequence asc, id asc", "context": ctx},
         )
 
-    return {"order_types": order_types, "routes": routes}
+    # 3. Moneda base de la compañía y tipos de cambio de monedas activas
+    comp_rec = models.execute_kw(
+        db, uid, password,
+        "res.company", "read",
+        [[int(company_id)]],
+        {"fields": ["id", "currency_id"], "context": ctx},
+    )[0]
+    base_curr_id = int(comp_rec["currency_id"][0]) if isinstance(comp_rec.get("currency_id"), list) else 1
+
+    currencies = models.execute_kw(
+        db, uid, password,
+        "res.currency", "search_read",
+        [[("active", "=", True)]],
+        {"fields": ["id", "name", "symbol", "rate", "position"], "context": ctx},
+    )
+    curr_map = {}
+    for c in currencies:
+        curr_map[int(c["id"])] = {
+            "id": int(c["id"]),
+            "name": c["name"],
+            "symbol": c.get("symbol") or "$",
+            "rate": float(c.get("rate") or 1.0),
+        }
+
+    base_curr = curr_map.get(base_curr_id, {"id": base_curr_id, "name": "ARS", "symbol": "$", "rate": 1.0})
+    base_rate = base_curr["rate"] or 1.0
+
+    # 4. Listas de precios activas de la compañía
+    raw_pricelists = models.execute_kw(
+        db, uid, password,
+        "product.pricelist", "search_read",
+        [[
+            ("active", "=", True),
+            "|", ("company_id", "=", False), ("company_id", "=", int(company_id)),
+        ]],
+        {"fields": ["id", "name", "currency_id"], "order": "sequence asc, id asc", "context": ctx},
+    )
+    pricelists = []
+    for pl in raw_pricelists:
+        c_info = pl.get("currency_id")
+        cid = int(c_info[0]) if isinstance(c_info, list) else base_curr_id
+        c_obj = curr_map.get(cid, base_curr)
+        # Tipo de cambio expresado en moneda base de la empresa (ej. 1 USD = X ARS)
+        pl_rate = c_obj["rate"] or 1.0
+        inverse_rate = round(base_rate / pl_rate, 4) if pl_rate else 1.0
+
+        pricelists.append({
+            "id": int(pl["id"]),
+            "name": pl["name"],
+            "currency_id": cid,
+            "currency_name": c_obj["name"],
+            "currency_symbol": c_obj["symbol"],
+            "exchange_rate": inverse_rate,
+            "is_foreign": cid != base_curr_id,
+        })
+
+    # 5. Producto de descuento configurado en Odoo (para Descuento global / Importe fijo)
+    discount_product = None
+    try:
+        comp_meta = models.execute_kw(db, uid, password, "res.company", "fields_get", [["sale_discount_product_id"]], {"attributes": ["type"]})
+        if "sale_discount_product_id" in comp_meta:
+            c_disc = models.execute_kw(db, uid, password, "res.company", "read", [[int(company_id)]], {"fields": ["sale_discount_product_id"], "context": ctx})[0]
+            if isinstance(c_disc.get("sale_discount_product_id"), list):
+                dp_id = int(c_disc["sale_discount_product_id"][0])
+                dp_rec = models.execute_kw(db, uid, password, "product.product", "read", [[dp_id]], {"fields": ["id", "default_code", "name"], "context": ctx})[0]
+                discount_product = {
+                    "id": int(dp_rec["id"]),
+                    "default_code": dp_rec.get("default_code") or "DESC",
+                    "name": dp_rec.get("name") or "Descuento",
+                }
+        if not discount_product:
+            param_val = models.execute_kw(
+                db, uid, password,
+                "ir.config_parameter", "get_param",
+                ["sale.default_discount_product_id"],
+            )
+            if param_val and str(param_val).isdigit():
+                dp_rec = models.execute_kw(db, uid, password, "product.product", "read", [[int(param_val)]], {"fields": ["id", "default_code", "name"], "context": ctx})
+                if dp_rec:
+                    discount_product = {
+                        "id": int(dp_rec[0]["id"]),
+                        "default_code": dp_rec[0].get("default_code") or "DESC",
+                        "name": dp_rec[0].get("name") or "Descuento",
+                    }
+        if not discount_product:
+            found_dp = models.execute_kw(
+                db, uid, password,
+                "product.product", "search_read",
+                [[("type", "=", "service"), "|", ("name", "ilike", "Descuento"), ("default_code", "ilike", "DESC")]],
+                {"fields": ["id", "default_code", "name"], "limit": 1, "context": ctx},
+            )
+            if found_dp:
+                discount_product = {
+                    "id": int(found_dp[0]["id"]),
+                    "default_code": found_dp[0].get("default_code") or "DESC",
+                    "name": found_dp[0].get("name") or "Descuento",
+                }
+    except Exception:
+        pass
+
+    return {
+        "order_types": order_types,
+        "routes": routes,
+        "pricelists": pricelists,
+        "base_currency": base_curr,
+        "discount_product": discount_product,
+    }
+
+def compute_pricelist_prices(
+    company_id: int,
+    allowed_company_ids: list,
+    pricelist_id: int,
+    items: list,
+    partner_id: int = None,
+):
+    """
+    Calcula el precio unitario exacto de cada producto según la lista de precios y moneda en Odoo.
+    """
+    if not items or not pricelist_id:
+        return {}
+
+    _, db, uid, password, models = _get_odoo_service_connection()
+    prices_out = {}
+
+    # Agrupar por cantidad para minimizar llamadas XML-RPC y respetar reglas por cantidad mínima
+    by_qty = {}
+    for it in items:
+        pid = int(it["product_id"])
+        qty = float(it.get("qty") or 1.0)
+        by_qty.setdefault(qty, []).append(pid)
+
+    for qty, prod_ids in by_qty.items():
+        unique_pids = list(set(prod_ids))
+        ctx = {
+            "allowed_company_ids": allowed_company_ids,
+            "company_id": int(company_id),
+            "pricelist": int(pricelist_id),
+            "quantity": qty,
+        }
+        if partner_id:
+            ctx["partner"] = int(partner_id)
+
+        recs = models.execute_kw(
+            db, uid, password,
+            "product.product", "read",
+            [unique_pids],
+            {"fields": ["id", "price", "list_price"], "context": ctx},
+        )
+        for r in recs:
+            pid = int(r["id"])
+            val = r.get("price") if r.get("price") is not None else r.get("list_price", 0.0)
+            prices_out[str(pid)] = round(float(val or 0.0), 4)
+
+    return prices_out
 
 def _get_partner_code_fields(models, db, uid, password):
     p_meta = models.execute_kw(
@@ -191,11 +346,7 @@ def search_customers(query: str, company_id: int, allowed_company_ids: list, lim
     code_fields = _get_partner_code_fields(models, db, uid, password)
     search_fields = ["name", "vat"] + code_fields
 
-    or_clauses = []
-    for f in search_fields:
-        or_clauses.append((f, "ilike", query))
-
-    # Construir árbol OR en notación polaca de Odoo
+    or_clauses = [(f, "ilike", query) for f in search_fields]
     or_domain = ["|"] * (len(or_clauses) - 1) + or_clauses
 
     domain = [
@@ -216,7 +367,6 @@ def search_customers(query: str, company_id: int, allowed_company_ids: list, lim
         },
     )
 
-    # Si no trajo resultados filtrando parent_id=False (por si buscan una sucursal), buscar sin restricción de parent_id
     if not partners:
         fallback_domain = [
             "|", ("company_id", "=", False), ("company_id", "=", int(company_id)),
@@ -238,7 +388,8 @@ def get_customer_details(partner_id: int, company_id: int, allowed_company_ids: 
     code_fields = _get_partner_code_fields(models, db, uid, password)
     addr_fields = [
         "id", "name", "type", "street", "street2", "zip", "city",
-        "state_id", "country_id", "vat", "phone", "mobile", "email", "commercial_partner_id"
+        "state_id", "country_id", "vat", "phone", "mobile", "email",
+        "commercial_partner_id", "property_product_pricelist",
     ] + code_fields
 
     main_list = models.execute_kw(
@@ -251,7 +402,6 @@ def get_customer_details(partner_id: int, company_id: int, allowed_company_ids: 
         raise ValueError("Cliente no encontrado en Odoo.")
     main_p = main_list[0]
 
-    # Obtener direcciones por defecto según lógica nativa de Odoo
     default_addrs = models.execute_kw(
         db, uid, password,
         "res.partner", "address_get",
@@ -276,13 +426,16 @@ def get_customer_details(partner_id: int, company_id: int, allowed_company_ids: 
     )
 
     formatted_list = [_format_partner_address(rp) for rp in related_partners]
-    # Ordenar poniendo primero al cliente elegido y luego por tipo
     formatted_list.sort(key=lambda x: (0 if x["id"] == int(partner_id) else 1, x["type"], x["name"]))
+
+    pl_info = main_p.get("property_product_pricelist")
+    default_pricelist_id = int(pl_info[0]) if isinstance(pl_info, list) else None
 
     return {
         "customer": _format_partner_address(main_p),
         "default_invoice_id": default_invoice_id,
         "default_delivery_id": default_delivery_id,
+        "default_pricelist_id": default_pricelist_id,
         "addresses": formatted_list,
     }
 
@@ -321,7 +474,7 @@ def search_quotations(query: str, company_id: int, allowed_company_ids: list, li
         "sale.order", "search_read",
         [domain],
         {
-            "fields": ["id", "name", "date_order", "partner_id", "amount_total", "state", "client_order_ref"],
+            "fields": ["id", "name", "date_order", "partner_id", "amount_total", "state", "client_order_ref", "pricelist_id"],
             "order": "id desc",
             "limit": limit,
             "context": ctx,
@@ -343,6 +496,7 @@ def get_quotation_details(order_id: int, company_id: int, allowed_company_ids: l
     read_fields = [
         "id", "name", "state", "company_id",
         "partner_id", "partner_invoice_id", "partner_shipping_id",
+        "pricelist_id", "currency_id",
         "client_order_ref", "order_line",
     ]
     for opt_f in ["type_id", "route_id", "purchase_order_number", "x_studio_purchase_order_number"]:
@@ -417,6 +571,7 @@ def get_quotation_details(order_id: int, company_id: int, allowed_company_ids: l
         "partner_id": partner_id,
         "partner_invoice_id": inv_id,
         "partner_shipping_id": ship_id,
+        "pricelist_id": int(o["pricelist_id"][0]) if isinstance(o.get("pricelist_id"), list) else None,
         "customer_bundle": customer_bundle,
         "type_id": int(o["type_id"][0]) if isinstance(o.get("type_id"), list) else None,
         "route_id": int(o["route_id"][0]) if isinstance(o.get("route_id"), list) else None,
@@ -433,6 +588,7 @@ def save_quotation(
     partner_shipping_id: int,
     lines: list,
     creator_user: dict,
+    pricelist_id: int = None,
     order_id: int = None,
     original_line_ids: list = None,
     type_id: int = None,
@@ -497,7 +653,6 @@ def save_quotation(
         else:
             order_line_commands.append((0, 0, vals))
 
-    # Eliminar en Odoo las líneas que existían previamente y fueron quitadas de la grilla
     if order_id and original_line_ids:
         for old_id in original_line_ids:
             if int(old_id) not in kept_line_ids:
@@ -509,6 +664,9 @@ def save_quotation(
         "partner_shipping_id": int(partner_shipping_id or partner_id),
         "order_line": order_line_commands,
     }
+
+    if pricelist_id:
+        order_vals["pricelist_id"] = int(pricelist_id)
 
     if type_id and "type_id" in so_fields:
         order_vals["type_id"] = int(type_id)
