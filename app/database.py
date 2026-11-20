@@ -1,6 +1,7 @@
 import sqlite3
 import os
 import json
+import time
 from datetime import datetime, date, timezone, timedelta
 
 try:
@@ -189,7 +190,21 @@ def replace_all_catalog(
     conn.isolation_level = None  # Control explícito de transacciones para swap atómico
     try:
         # FASE 1: Volcar datos en tablas *_staging sin bloquear las tablas productivas
+        suffix = int(time.time())
         conn.execute("BEGIN;")
+        try:
+            conn.execute(f"CREATE INDEX idx_prod_code_{suffix} ON products_staging(default_code);")
+            conn.execute(f"CREATE INDEX idx_prod_name_{suffix} ON products_staging(name);")
+            conn.execute(f"CREATE INDEX idx_prod_barcode_{suffix} ON products_staging(barcode_ids);")
+            conn.execute(f"CREATE INDEX idx_prod_brand_{suffix} ON products_staging(brand);")
+            conn.execute(f"CREATE INDEX idx_wh_company_{suffix} ON warehouses_staging(company_id);")
+            conn.execute(f"CREATE INDEX idx_ps_wh_prod_{suffix} ON product_stock_staging(warehouse_id, product_id, free_qty);")
+            if pricelist_item_rows is not None:
+                conn.execute(f"CREATE INDEX idx_pli_pricelist_{suffix} ON pricelist_items_staging(pricelist_id);")
+            conn.execute("COMMIT;")
+        except Exception:
+            conn.execute("ROLLBACK;")
+            raise
         try:
             conn.execute("DROP TABLE IF EXISTS warehouses_staging;")
             conn.execute("""
