@@ -13,10 +13,67 @@ def _get_odoo_connection():
     common = xmlrpc.client.ServerProxy(f"{url}/xmlrpc/2/common", allow_none=True)
     uid = common.authenticate(db, username, password, {})
     if not uid:
-        raise ConnectionError("No se pudo autenticar contra Odoo.")
+        raise ConnectionError("No se pudo autenticar el servicio contra Odoo.")
     models = xmlrpc.client.ServerProxy(f"{url}/xmlrpc/2/object", allow_none=True)
     ctx = {"allowed_company_ids": ALLOWED_COMPANIES, "company_id": COMPANY_ID}
     return url, db, uid, password, models, ctx
+
+def authenticate_odoo_user(login: str, password: str):
+    """
+    Valida usuario y contraseña directamente contra Odoo.
+    Verifica que sea usuario interno activo con acceso a Compañía 9.
+    """
+    url = os.getenv("ODOO_URL", "").rstrip("/")
+    db = os.getenv("ODOO_DB", "odoo")
+
+    common = xmlrpc.client.ServerProxy(f"{url}/xmlrpc/2/common", allow_none=True)
+    user_uid = common.authenticate(db, login.strip(), password, {})
+    if not user_uid:
+        return None, "Usuario o contraseña de Odoo incorrectos."
+
+    # Leemos los datos y permisos del usuario usando la conexión de servicio
+    _, _, svc_uid, svc_pass, models, _ = _get_odoo_connection()
+    users = models.execute_kw(
+        db, svc_uid, svc_pass,
+        "res.users", "read",
+        [[user_uid]],
+        {"fields": ["id", "name", "login", "partner_id", "company_ids", "groups_id", "share", "active"]},
+    )
+    if not users:
+        return None, "No se encontró el perfil del usuario en Odoo."
+
+    u = users[0]
+    if not u.get("active") or u.get("share"):
+        return None, "El usuario no es un usuario interno activo de Odoo."
+
+    if COMPANY_ID not in (u.get("company_ids") or []):
+        return None, f"El usuario no tiene permisos habilitados para la Compañía {COMPANY_ID}."
+
+    # Filtro opcional por grupo de seguridad de Odoo (ej. ALLOWED_ODOO_GROUP="Cotizador Web")
+    required_group = os.getenv("ALLOWED_ODOO_GROUP", "").strip()
+    if required_group:
+        user_groups = models.execute_kw(
+            db, svc_uid, svc_pass,
+            "res.groups", "read",
+            [u.get("groups_id", [])],
+            {"fields": ["id", "name", "full_name"]},
+        )
+        matched = any(
+            required_group.lower() in (g.get("name") or "").lower()
+            or required_group.lower() in (g.get("full_name") or "").lower()
+            or required_group == str(g.get("id"))
+            for g in user_groups
+        )
+        if not matched:
+            return None, f"El usuario no pertenece al grupo habilitado ({required_group})."
+
+    partner_info = u.get("partner_id")
+    return {
+        "uid": u["id"],
+        "name": u["name"],
+        "login": u["login"],
+        "partner_id": partner_info[0] if isinstance(partner_info, list) else None,
+    }, None
 
 def get_quotation_options():
     _, db, uid, password, models, ctx = _get_odoo_connection()
@@ -34,7 +91,6 @@ def get_quotation_options():
         {"attributes": ["type", "relation"]},
     )
 
-    # 1. Tipos de pedido (sale.order.type) para Compañía 9 o globales
     order_types = []
     type_model = so_fields.get("type_id", {}).get("relation")
     if type_model:
@@ -45,7 +101,6 @@ def get_quotation_options():
             {"fields": ["id", "name"], "order": "sequence asc, id asc", "context": ctx},
         )
 
-    # 2. Rutas seleccionables en venta (stock.route) para Compañía 9 o globales
     routes = []
     route_model = (
         sol_fields.get("route_id", {}).get("relation")
@@ -85,8 +140,10 @@ def search_customers(query: str, limit: int = 15):
 def create_draft_quotation(
     partner_id: int,
     lines: list,
+    creator_user: dict,
     type_id: int = None,
     route_id: int = None,
+    purchase_order_number: str = "",
     client_order_ref: str = "",
 ):
     url, db, uid, password, models, ctx = _get_odoo_connection()
@@ -94,7 +151,7 @@ def create_draft_quotation(
     so_fields = models.execute_kw(
         db, uid, password,
         "sale.order", "fields_get",
-        [["type_id", "route_id"]],
+        [["type_id", "route_id", "purchase_order_number", "x_studio_purchase_order_number"]],
         {"attributes": ["type"]},
     )
     sol_fields = models.execute_kw(
@@ -106,18 +163,21 @@ def create_draft_quotation(
 
     order_lines = []
     for line in lines:
-        # Omitimos tax_id para que Odoo 16 asigne automáticamente los impuestos de la Compañía 9
         line_vals = {
             "product_id": int(line["product_id"]),
             "product_uom_qty": float(line["qty"]),
             "price_unit": float(line["price_unit"]),
             "discount": float(line.get("discount", 0.0)),
         }
+        if line.get("name"):
+            line_vals["name"] = str(line["name"])
+
         if route_id and "route_id" in sol_fields:
             line_vals["route_id"] = int(route_id)
 
         order_lines.append((0, 0, line_vals))
 
+    # NO enviamos user_id para respetar el vendedor asignado en la ficha del cliente
     order_vals = {
         "partner_id": int(partner_id),
         "company_id": COMPANY_ID,
@@ -128,9 +188,15 @@ def create_draft_quotation(
     if type_id and "type_id" in so_fields:
         order_vals["type_id"] = int(type_id)
 
-    # Si existe route_id en cabecera de sale.order, también lo asignamos allí
     if route_id and "route_id" in so_fields:
         order_vals["route_id"] = int(route_id)
+
+    if purchase_order_number.strip():
+        po_val = purchase_order_number.strip()
+        if "purchase_order_number" in so_fields:
+            order_vals["purchase_order_number"] = po_val
+        elif "x_studio_purchase_order_number" in so_fields:
+            order_vals["x_studio_purchase_order_number"] = po_val
 
     if client_order_ref.strip():
         order_vals["client_order_ref"] = client_order_ref.strip()
@@ -141,6 +207,25 @@ def create_draft_quotation(
         [order_vals],
         {"context": ctx},
     )
+
+    # Registrar en el Chatter de Odoo quién creó la cotización sin alterar el vendedor
+    creator_name = creator_user.get("name", "Usuario Web")
+    creator_login = creator_user.get("login", "")
+    creator_partner_id = creator_user.get("partner_id")
+
+    post_kwargs = {
+        "body": f"<p>Cotización creada desde <strong>Cotizador Web</strong> por: <strong>{creator_name}</strong> ({creator_login})</p>",
+        "message_type": "comment",
+        "subtype_xmlid": "mail.mt_note",
+        "context": ctx,
+    }
+    if creator_partner_id:
+        post_kwargs["author_id"] = int(creator_partner_id)
+
+    try:
+        models.execute_kw(db, uid, password, "sale.order", "message_post", [[order_id]], post_kwargs)
+    except Exception:
+        pass
 
     created = models.execute_kw(
         db, uid, password,

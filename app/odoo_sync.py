@@ -51,20 +51,26 @@ def run_full_sync():
                     resultados.extend(future.result())
             return resultados
 
-        # 1. Metadatos
+        # 1. Metadatos (incluyendo detección automática del campo de Marca)
         update_sync_status("running", "Leyendo metadatos y ubicaciones de almacenes...")
         studio_field = "x_studio_selection_field_6ua_1j8tii7sp"
-        fields_meta = execute_kw(
-            "product.product",
-            "fields_get",
-            [[studio_field, "partner_id", "seller_ids", "barcode_ids"]],
-            {"attributes": ["type", "relation", "selection"]},
-        )
+        all_prod_fields = execute_kw("product.product", "fields_get", [[]], {"attributes": ["type", "relation", "selection"]})
 
-        estado_selection_map = dict(fields_meta.get(studio_field, {}).get("selection", []))
-        tiene_partner_directo = "partner_id" in fields_meta
+        estado_selection_map = dict(all_prod_fields.get(studio_field, {}).get("selection", []))
 
-        barcode_rel_model = fields_meta.get("barcode_ids", {}).get("relation")
+        # Detectar campo de marca (product_brand_id, brand_id, o campo con 'brand'/'marca')
+        brand_field = None
+        for candidate in ["product_brand_id", "brand_id", "x_studio_marca", "x_studio_brand_id"]:
+            if candidate in all_prod_fields:
+                brand_field = candidate
+                break
+        if not brand_field:
+            for fname in all_prod_fields:
+                if "brand" in fname or "marca" in fname:
+                    brand_field = fname
+                    break
+
+        barcode_rel_model = all_prod_fields.get("barcode_ids", {}).get("relation")
         barcode_code_field = "name"
         if barcode_rel_model:
             bc_meta = execute_kw(barcode_rel_model, "fields_get", [[]], {"attributes": ["type"]})
@@ -112,15 +118,13 @@ def run_full_sync():
             "barcode_ids",
             studio_field,
         ]
-        if tiene_partner_directo:
-            campos_lectura.append("partner_id")
-        elif "seller_ids" in fields_meta:
-            campos_lectura.append("seller_ids")
+        if brand_field:
+            campos_lectura.append(brand_field)
 
         productos_raw = leer_en_paralelo("product.product", product_ids, campos_lectura)
 
-        # 4. Relaciones (impuestos Cía 1, códigos de barra, proveedores)
-        update_sync_status("running", "Resolviendo impuestos, códigos de barra y proveedores...")
+        # 4. Relaciones (impuestos Cía 1 y códigos de barra)
+        update_sync_status("running", "Resolviendo impuestos y códigos de barra...")
         all_tax_ids = list({tid for p in productos_raw for tid in p.get("taxes_id", [])})
         taxes_records = leer_en_paralelo("account.tax", all_tax_ids, ["name", "company_id"], batch_size=5000)
         taxes_map = {
@@ -135,30 +139,18 @@ def run_full_sync():
             bc_records = leer_en_paralelo(barcode_rel_model, all_barcode_ids, [barcode_code_field], batch_size=5000)
             barcodes_map = {b["id"]: str(b[barcode_code_field]) for b in bc_records if b.get(barcode_code_field)}
 
-        supplierinfo_map = {}
-        if not tiene_partner_directo:
-            all_seller_ids = list({sid for p in productos_raw for sid in p.get("seller_ids", [])})
-            if all_seller_ids:
-                sellers = leer_en_paralelo("product.supplierinfo", all_seller_ids, ["partner_id", "sequence"], batch_size=5000)
-                supplierinfo_map = {s["id"]: s for s in sellers}
-
         # 5. Guardar en SQLite
         update_sync_status("running", "Guardando índice en base de datos local...")
         rows_to_insert = []
         for p in productos_raw:
             pid = p["id"]
-            if tiene_partner_directo:
-                partner_val = p.get("partner_id")
-                proveedor = partner_val[1] if isinstance(partner_val, list) else ""
-            else:
-                s_ids = p.get("seller_ids", [])
-                s_objs = [
-                    supplierinfo_map[sid]
-                    for sid in s_ids
-                    if sid in supplierinfo_map and supplierinfo_map[sid].get("partner_id")
-                ]
-                s_objs.sort(key=lambda x: x.get("sequence", 999))
-                proveedor = s_objs[0]["partner_id"][1] if s_objs else ""
+            marca = ""
+            if brand_field:
+                b_val = p.get(brand_field)
+                if isinstance(b_val, list) and len(b_val) > 1:
+                    marca = str(b_val[1])
+                elif isinstance(b_val, str):
+                    marca = b_val
 
             valid_tax_ids = [tid for tid in p.get("taxes_id", []) if tid in taxes_map]
             impuestos = ", ".join(taxes_map[tid] for tid in valid_tax_ids)
@@ -174,7 +166,7 @@ def run_full_sync():
                 float(p.get("list_price") or 0.0),
                 impuestos,
                 json.dumps(valid_tax_ids),
-                proveedor,
+                marca,
                 codigos_barra,
                 estado,
                 stock_por_almacen[5].get(pid, 0.0),

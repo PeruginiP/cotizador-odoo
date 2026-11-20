@@ -24,7 +24,7 @@ def init_db():
                 list_price REAL DEFAULT 0.0,
                 taxes_id TEXT,
                 tax_ids_json TEXT,
-                partner_id TEXT,
+                brand TEXT DEFAULT '',
                 barcode_ids TEXT,
                 estado TEXT,
                 stock_5 REAL DEFAULT 0.0,
@@ -32,10 +32,15 @@ def init_db():
                 stock_7 REAL DEFAULT 0.0
             )
         """)
+        # Migración automática si la tabla venía con la estructura anterior
+        cols = [r["name"] for r in conn.execute("PRAGMA table_info(products)").fetchall()]
+        if "brand" not in cols:
+            conn.execute("ALTER TABLE products ADD COLUMN brand TEXT DEFAULT '';")
+
         conn.execute("CREATE INDEX IF NOT EXISTS idx_prod_code ON products(default_code);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_prod_name ON products(name);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_prod_barcode ON products(barcode_ids);")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_prod_partner ON products(partner_id);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_prod_brand ON products(brand);")
 
         conn.execute("""
             CREATE TABLE IF NOT EXISTS sync_status (
@@ -74,7 +79,7 @@ def replace_all_products(rows):
             conn.executemany("""
                 INSERT INTO products (
                     id, default_code, name, list_price, taxes_id, tax_ids_json,
-                    partner_id, barcode_ids, estado, stock_5, stock_6, stock_7
+                    brand, barcode_ids, estado, stock_5, stock_6, stock_7
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, rows)
     finally:
@@ -112,9 +117,9 @@ def query_products_datatables(start: int, length: int, search_value: str, order_
     columns_map = {
         0: "default_code",
         1: "name",
-        2: "list_price",
-        3: "taxes_id",
-        4: "partner_id",
+        2: "brand",
+        3: "list_price",
+        4: "taxes_id",
         5: "barcode_ids",
         6: "estado",
         7: "stock_5",
@@ -135,12 +140,11 @@ def query_products_datatables(start: int, length: int, search_value: str, order_
             where_clauses.append("(stock_5 > 0 OR stock_6 > 0 OR stock_7 > 0)")
 
         if search_value and search_value.strip():
-            # Búsqueda multi-palabra: cada término debe aparecer en código, nombre, barras o proveedor
             terms = search_value.strip().split()
             for term in terms:
                 like_term = f"%{term}%"
                 where_clauses.append(
-                    "(default_code LIKE ? OR name LIKE ? OR barcode_ids LIKE ? OR partner_id LIKE ?)"
+                    "(default_code LIKE ? OR name LIKE ? OR barcode_ids LIKE ? OR brand LIKE ?)"
                 )
                 params.extend([like_term, like_term, like_term, like_term])
 
@@ -152,7 +156,7 @@ def query_products_datatables(start: int, length: int, search_value: str, order_
 
         query_sql = f"""
             SELECT id, default_code, name, list_price, taxes_id, tax_ids_json,
-                   partner_id, barcode_ids, estado, stock_5, stock_6, stock_7
+                   brand, barcode_ids, estado, stock_5, stock_6, stock_7
             FROM products
             {where_sql}
             ORDER BY {order_col} {direction}

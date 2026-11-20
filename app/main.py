@@ -17,6 +17,7 @@ from app.database import (
 )
 from app.odoo_sync import run_full_sync
 from app.odoo_client import (
+    authenticate_odoo_user,
     search_customers,
     create_draft_quotation,
     get_quotation_options,
@@ -54,26 +55,38 @@ def login_submit(request: Request, username: str = Form(...), password: str = Fo
     client_ip = request.client.host if request.client else "unknown"
     now = time.time()
     attempts = [t for t in login_attempts.get(client_ip, []) if now - t < 300]
-    if len(attempts) >= 5:
+    if len(attempts) >= 6:
         return templates.TemplateResponse(
             "login.html",
             {"request": request, "error": "Demasiados intentos fallidos. Esperá 5 minutos."},
             status_code=429,
         )
 
-    expected_user = os.getenv("APP_USER", "admin")
-    expected_pass = os.getenv("APP_PASSWORD", "")
-
-    if username == expected_user and expected_pass and password == expected_pass:
+    # 1. Validar contra usuarios reales de Odoo
+    odoo_user, error_msg = authenticate_odoo_user(username, password)
+    if odoo_user:
         login_attempts.pop(client_ip, None)
-        request.session["user"] = username
+        request.session["user"] = odoo_user
+        return RedirectResponse(url="/", status_code=302)
+
+    # 2. Respaldo de administrador local si está configurado en Coolify
+    expected_user = os.getenv("APP_USER", "")
+    expected_pass = os.getenv("APP_PASSWORD", "")
+    if expected_user and expected_pass and username == expected_user and password == expected_pass:
+        login_attempts.pop(client_ip, None)
+        request.session["user"] = {
+            "uid": 0,
+            "name": f"Admin ({username})",
+            "login": username,
+            "partner_id": None,
+        }
         return RedirectResponse(url="/", status_code=302)
 
     attempts.append(now)
     login_attempts[client_ip] = attempts
     return templates.TemplateResponse(
         "login.html",
-        {"request": request, "error": "Usuario o contraseña incorrectos."},
+        {"request": request, "error": error_msg or "Usuario o contraseña incorrectos."},
         status_code=401,
     )
 
@@ -99,7 +112,7 @@ def index(request: Request):
 
 # --- API DE PRODUCTOS (DATATABLES SERVER-SIDE) ---
 @app.get("/api/products")
-def api_products(request: Request, user: str = Depends(get_current_user)):
+def api_products(request: Request, user: dict = Depends(get_current_user)):
     params = request.query_params
     draw = int(params.get("draw", 1))
     start = int(params.get("start", 0))
@@ -126,11 +139,11 @@ def api_products(request: Request, user: str = Depends(get_current_user)):
 
 # --- API DE SINCRONIZACIÓN ---
 @app.get("/api/sync/status")
-def api_sync_status(user: str = Depends(get_current_user)):
+def api_sync_status(user: dict = Depends(get_current_user)):
     return JSONResponse(get_sync_status())
 
 @app.post("/api/sync")
-def api_trigger_sync(user: str = Depends(get_current_user)):
+def api_trigger_sync(user: dict = Depends(get_current_user)):
     current = get_sync_status()
     if current.get("status") == "running":
         return JSONResponse({"ok": False, "message": "Ya hay una sincronización en curso."})
@@ -140,14 +153,14 @@ def api_trigger_sync(user: str = Depends(get_current_user)):
 
 # --- API DE OPCIONES, CLIENTES Y COTIZACIONES ---
 @app.get("/api/quotation-options")
-def api_quotation_options(user: str = Depends(get_current_user)):
+def api_quotation_options(user: dict = Depends(get_current_user)):
     try:
         return JSONResponse(get_quotation_options())
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/customers")
-def api_customers(q: str = "", user: str = Depends(get_current_user)):
+def api_customers(q: str = "", user: dict = Depends(get_current_user)):
     if len(q.strip()) < 2:
         return JSONResponse([])
     try:
@@ -158,6 +171,7 @@ def api_customers(q: str = "", user: str = Depends(get_current_user)):
 
 class QuotationLineIn(BaseModel):
     product_id: int
+    name: str = ""
     qty: float
     price_unit: float
     discount: float = 0.0
@@ -168,23 +182,26 @@ class QuotationCreateIn(BaseModel):
     customer_name: str
     type_id: Optional[int] = None
     route_id: Optional[int] = None
+    purchase_order_number: str = ""
     client_order_ref: str = ""
     lines: List[QuotationLineIn]
 
 @app.post("/api/quotations")
-def api_create_quotation(payload: QuotationCreateIn, user: str = Depends(get_current_user)):
+def api_create_quotation(payload: QuotationCreateIn, user: dict = Depends(get_current_user)):
     if not payload.lines:
         raise HTTPException(status_code=400, detail="La cotización debe tener al menos un producto.")
     try:
         res = create_draft_quotation(
             partner_id=payload.partner_id,
             lines=[line.model_dump() for line in payload.lines],
+            creator_user=user,
             type_id=payload.type_id,
             route_id=payload.route_id,
+            purchase_order_number=payload.purchase_order_number,
             client_order_ref=payload.client_order_ref,
         )
         log_quotation(
-            username=user,
+            username=user.get("login", "desconocido"),
             order_id=res["order_id"],
             order_name=res["order_name"],
             customer_name=payload.customer_name,
