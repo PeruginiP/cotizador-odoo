@@ -126,7 +126,7 @@ def index(request: Request):
     user = request.session.get("user")
     if not user:
         return RedirectResponse(url="/login", status_code=302)
-    return templates.TemplateResponse(
+    response = templates.TemplateResponse(
         "index.html",
         {
             "request": request,
@@ -135,6 +135,8 @@ def index(request: Request):
             "odoo_url": os.getenv("ODOO_URL", "").rstrip("/"),
         },
     )
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    return response
 
 @app.get("/api/warehouses")
 def api_warehouses(user: dict = Depends(get_current_user)):

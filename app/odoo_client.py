@@ -48,49 +48,12 @@ def _get_company_hierarchy(models, db, uid, password, company_id: int, allowed_c
     except Exception:
         return [int(company_id)]
 
+
 def _extract_m2o_id(val):
     if isinstance(val, list) and len(val) > 0:
         return int(val[0])
     if isinstance(val, int) and not isinstance(val, bool) and val > 0:
         return int(val)
-    return None
-
-
-def _resolve_partner_property_id(models, db, uid, password, field_name: str, partner_ids: list, hierarchy_ids: list):
-    """Fallback directo sobre ir.property para campos company_dependent=True."""
-    res_refs = [f"res.partner,{int(pid)}" for pid in partner_ids if pid]
-    if not res_refs:
-        return None
-
-    try:
-        props = models.execute_kw(
-            db, uid, password,
-            "ir.property", "search_read",
-            [[
-                ("name", "=", field_name),
-                ("res_id", "in", res_refs),
-            ]],
-            {"fields": ["res_id", "company_id", "value_reference"]},
-        )
-        if not props:
-            return None
-
-        company_priority = list(hierarchy_ids) + [False]
-        for target_ref in res_refs:
-            for target_comp in company_priority:
-                for pr in props:
-                    if pr.get("res_id") != target_ref:
-                        continue
-                    pr_comp = _extract_m2o_id(pr.get("company_id")) or False
-                    if pr_comp == target_comp:
-                        vref = pr.get("value_reference") or ""
-                        if "," in vref:
-                            try:
-                                return int(vref.split(",")[1])
-                            except ValueError:
-                                pass
-    except Exception:
-        pass
     return None
 
 
@@ -289,8 +252,8 @@ def get_quotation_options(company_id: int, allowed_company_ids: list):
             {"fields": ["id", "name"], "order": "sequence asc, id asc", "context": ctx},
         )
 
-    # 3. Listas de precios y monedas desde SQLite local (o en vivo desde Odoo si aún no se sincronizaron)
-    local_pl_bundle = get_local_pricelists_for_company(int(company_id))
+    # 3. Listas de precios y monedas desde SQLite local (incluyendo listas de la empresa padre)
+    local_pl_bundle = get_local_pricelists_for_company(int(company_id), hierarchy_ids)
     if local_pl_bundle and local_pl_bundle.get("pricelists"):
         pricelists = local_pl_bundle["pricelists"]
         base_curr = local_pl_bundle["base_currency"]
@@ -443,7 +406,9 @@ def _get_partner_code_fields(models, db, uid, password):
 
 def search_customers(query: str, company_id: int, allowed_company_ids: list, include_children: bool = False, limit: int = 20):
     _, db, uid, password, models = _get_odoo_service_connection()
-    ctx = {"allowed_company_ids": allowed_company_ids, "company_id": int(company_id)}
+    hierarchy_ids = _get_company_hierarchy(models, db, uid, password, int(company_id), allowed_company_ids)
+    full_allowed = list(set(allowed_company_ids + hierarchy_ids))
+    ctx = {"allowed_company_ids": full_allowed, "company_id": int(company_id)}
 
     code_fields = _get_partner_code_fields(models, db, uid, password)
     search_fields = ["name", "vat"] + code_fields
@@ -455,7 +420,7 @@ def search_customers(query: str, company_id: int, allowed_company_ids: list, inc
 
     if include_children:
         domain = [
-            "|", ("company_id", "=", False), ("company_id", "=", int(company_id)),
+            "|", ("company_id", "=", False), ("company_id", "in", hierarchy_ids),
         ] + or_domain
         partners = models.execute_kw(
             db, uid, password,
@@ -466,7 +431,7 @@ def search_customers(query: str, company_id: int, allowed_company_ids: list, inc
     else:
         domain = [
             "&",
-            "|", ("company_id", "=", False), ("company_id", "=", int(company_id)),
+            "|", ("company_id", "=", False), ("company_id", "in", hierarchy_ids),
             ("parent_id", "=", False),
         ] + or_domain
         partners = models.execute_kw(
@@ -477,7 +442,7 @@ def search_customers(query: str, company_id: int, allowed_company_ids: list, inc
         )
         if not partners:
             fallback_domain = [
-                "|", ("company_id", "=", False), ("company_id", "=", int(company_id)),
+                "|", ("company_id", "=", False), ("company_id", "in", hierarchy_ids),
             ] + or_domain
             partners = models.execute_kw(
                 db, uid, password,
@@ -494,7 +459,10 @@ def search_customers(query: str, company_id: int, allowed_company_ids: list, inc
 
 def get_single_partner_card(partner_id: int, company_id: int, allowed_company_ids: list):
     _, db, uid, password, models = _get_odoo_service_connection()
-    ctx = {"allowed_company_ids": allowed_company_ids, "company_id": int(company_id)}
+    hierarchy_ids = _get_company_hierarchy(models, db, uid, password, int(company_id), allowed_company_ids)
+    full_allowed = list(set(allowed_company_ids + hierarchy_ids))
+    ctx = {"allowed_company_ids": full_allowed, "company_id": int(company_id)}
+
     code_fields = _get_partner_code_fields(models, db, uid, password)
     addr_fields = [
         "id", "name", "parent_id", "type", "street", "street2", "zip", "city",
@@ -546,7 +514,7 @@ def get_customer_details(partner_id: int, company_id: int, allowed_company_ids: 
     comm_id = _extract_m2o_id(main_p.get("commercial_partner_id")) or int(partner_id)
     candidate_pids = [int(partner_id)] + ([comm_id] if comm_id != int(partner_id) else [])
 
-    # 1. Resolver res.partner.sale_type recorriendo sucursal -> empresa padre -> contexto base -> ir.property
+    # 1. Resolver res.partner.sale_type recorriendo sucursal -> empresa padre -> contexto base
     default_order_type_id = _extract_m2o_id(main_p.get("sale_type")) if has_sale_type else None
     if has_sale_type and not default_order_type_id:
         contexts_to_try = [{"allowed_company_ids": full_allowed, "company_id": cid} for cid in hierarchy_ids]
@@ -566,19 +534,27 @@ def get_customer_details(partner_id: int, company_id: int, allowed_company_ids: 
                         break
             if default_order_type_id:
                 break
-        if not default_order_type_id:
-            priority_companies = list(dict.fromkeys(hierarchy_ids + full_allowed))
-            default_order_type_id = _resolve_partner_property_id(
-                models, db, uid, password, "sale_type", candidate_pids, priority_companies
-            )
 
-    # 2. Resolver lista de precios predeterminada del cliente
+    # 2. Resolver lista de precios predeterminada del cliente en sucursal -> empresa padre
     default_pricelist_id = _extract_m2o_id(main_p.get("property_product_pricelist"))
     if not default_pricelist_id:
-        priority_companies = list(dict.fromkeys(hierarchy_ids + full_allowed))
-        default_pricelist_id = _resolve_partner_property_id(
-            models, db, uid, password, "property_product_pricelist", candidate_pids, priority_companies
-        )
+        contexts_to_try = [{"allowed_company_ids": full_allowed, "company_id": cid} for cid in hierarchy_ids]
+        contexts_to_try.append({"allowed_company_ids": full_allowed})
+        for cand_pid in candidate_pids:
+            for test_ctx in contexts_to_try:
+                rec = models.execute_kw(
+                    db, uid, password,
+                    "res.partner", "read",
+                    [[cand_pid]],
+                    {"fields": ["property_product_pricelist"], "context": test_ctx},
+                )
+                if rec:
+                    val = _extract_m2o_id(rec[0].get("property_product_pricelist"))
+                    if val:
+                        default_pricelist_id = val
+                        break
+            if default_pricelist_id:
+                break
 
     default_addrs = models.execute_kw(
         db, uid, password,
@@ -614,6 +590,7 @@ def get_customer_details(partner_id: int, company_id: int, allowed_company_ids: 
         "default_order_type_id": default_order_type_id,
         "related_addresses": formatted_list,
     }
+
 
 def search_quotations(query: str, company_id: int, allowed_company_ids: list, limit: int = 20):
     _, db, uid, password, models = _get_odoo_service_connection()

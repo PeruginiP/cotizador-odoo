@@ -195,7 +195,6 @@ def replace_all_catalog(
     conn = get_conn()
     conn.isolation_level = None
     try:
-        # FASE 1: Cargar datos en tablas *_staging sin bloquear las tablas en vivo
         conn.execute("BEGIN;")
         try:
             conn.execute("DROP TABLE IF EXISTS warehouses_staging;")
@@ -331,7 +330,6 @@ def replace_all_catalog(
             _safe_rollback(conn)
             raise
 
-        # FASE 2: Crear índices esenciales con nombre único sobre *_staging
         suffix = int(time.time())
         conn.execute("BEGIN;")
         try:
@@ -346,7 +344,6 @@ def replace_all_catalog(
             _safe_rollback(conn)
             raise
 
-        # FASE 3: Intercambio atómico instantáneo (< 5 ms)
         conn.execute("BEGIN IMMEDIATE;")
         try:
             conn.execute("DROP TABLE IF EXISTS warehouses;")
@@ -385,6 +382,7 @@ def replace_all_catalog(
             pass
     finally:
         conn.close()
+
 def get_all_warehouses():
     conn = get_conn()
     try:
@@ -395,7 +393,7 @@ def get_all_warehouses():
     finally:
         conn.close()
 
-def get_local_pricelists_for_company(company_id: int):
+def get_local_pricelists_for_company(company_id: int, hierarchy_ids: list = None):
     conn = get_conn()
     try:
         curr_rows = conn.execute(
@@ -411,14 +409,17 @@ def get_local_pricelists_for_company(company_id: int):
             base_curr = dict(curr_rows[0])
         base_rate = float(base_curr["rate"] or 1.0)
 
+        allowed_comp_ids = list({0, int(company_id)} | {int(cid) for cid in (hierarchy_ids or [])})
+        placeholders = ",".join("?" for _ in allowed_comp_ids)
+
         pl_rows = conn.execute(
-            """
+            f"""
             SELECT id, name, currency_id, company_id, sequence
             FROM pricelists
-            WHERE company_id = 0 OR company_id = ?
+            WHERE company_id IN ({placeholders})
             ORDER BY sequence ASC, id ASC
             """,
-            (company_id,),
+            allowed_comp_ids,
         ).fetchall()
 
         pricelists = []
@@ -631,7 +632,7 @@ def get_products_by_ids(product_ids: list, company_id: int):
             pid = int(r["id"])
             taxes_map = json.loads(r["taxes_json"] or "{}")
             taxes_list = taxes_map.get(comp_key, [])
-            
+
             result[pid] = {
                 "id": pid,
                 "default_code": r["default_code"] or "",
@@ -773,7 +774,7 @@ def query_products_datatables(
             pid = int(r["id"])
             taxes_map = json.loads(r["taxes_json"] or "{}")
             taxes_list = taxes_map.get(comp_key, [])
-            
+
             display_arr = []
             for t in taxes_list:
                 amt = t["amount"]
