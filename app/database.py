@@ -128,6 +128,44 @@ def get_all_warehouses():
     finally:
         conn.close()
 
+def get_products_by_ids(product_ids: list):
+    if not product_ids:
+        return {}
+    unique_ids = list({int(pid) for pid in product_ids if pid})
+    if not unique_ids:
+        return {}
+
+    conn = get_conn()
+    try:
+        placeholders = ",".join("?" for _ in unique_ids)
+        rows = conn.execute(
+            f"SELECT id, default_code, name, list_price, brand FROM products WHERE id IN ({placeholders})",
+            unique_ids,
+        ).fetchall()
+
+        st_rows = conn.execute(
+            f"SELECT product_id, warehouse_id, free_qty FROM product_stock WHERE product_id IN ({placeholders})",
+            unique_ids,
+        ).fetchall()
+        stock_map = {}
+        for sr in st_rows:
+            stock_map.setdefault(int(sr["product_id"]), {})[str(sr["warehouse_id"])] = float(sr["free_qty"])
+
+        result = {}
+        for r in rows:
+            pid = int(r["id"])
+            result[pid] = {
+                "id": pid,
+                "default_code": r["default_code"] or "",
+                "name": r["name"] or "",
+                "list_price": float(r["list_price"] or 0.0),
+                "brand": r["brand"] or "",
+                "stocks": stock_map.get(pid, {}),
+            }
+        return result
+    finally:
+        conn.close()
+
 def update_sync_status(status, message, last_sync=None, total_products=None):
     conn = get_conn()
     try:
@@ -173,10 +211,6 @@ def query_products_datatables(
         ).fetchall()
         company_wh_ids = [int(w["id"]) for w in wh_rows]
 
-        # Mapeo de columnas de DataTables:
-        # 0: checkbox, 1: default_code, 2: name, 3: brand, 4: list_price,
-        # 5: taxes_id, 6: barcode_ids, 7: estado,
-        # 8 .. 8+N-1: almacenes de la compañía, 8+N: total stock de la compañía
         fixed_cols = {
             1: "default_code",
             2: "name",

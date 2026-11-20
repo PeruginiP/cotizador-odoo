@@ -10,7 +10,7 @@
     <style>
         body {
             font-size: 0.88rem;
-            background-color: #f4f6f9;
+            background-color: #eef0f4;
         }
 
         .table-sm td,
@@ -25,19 +25,50 @@
 
         .customer-results {
             position: absolute;
-            z-index: 1050;
+            z-index: 1055;
             width: 100%;
-            max-height: 240px;
+            max-height: 280px;
             overflow-y: auto;
         }
 
+        /* Ficha estilo Odoo */
+        .odoo-sheet {
+            background: #ffffff;
+            border: 1px solid #d8dadd;
+            border-radius: 4px;
+            box-shadow: 0 1px 4px rgba(0, 0, 0, 0.06);
+        }
+
+        .odoo-field-label {
+            font-weight: 600;
+            color: #495057;
+            font-size: 0.84rem;
+            border-right: 1px solid #e9ecef;
+            padding-right: 10px;
+        }
+
+        .odoo-customer-card {
+            background-color: #f8f9fa;
+            border-left: 4px solid #714B67;
+            border-radius: 4px;
+            padding: 10px 14px;
+        }
+
+        .odoo-address-preview {
+            font-size: 0.81rem;
+            color: #5c636a;
+            margin-top: 3px;
+            padding-left: 2px;
+        }
+
+        /* Grilla de líneas estilo Odoo */
         .product-cell {
             cursor: pointer;
             background-color: #fffdf5;
             border: 1px dashed #adb5bd !important;
             border-radius: 4px;
             padding: 4px 8px;
-            min-width: 150px;
+            min-width: 145px;
             transition: all 0.15s;
         }
 
@@ -48,13 +79,76 @@
             outline: none;
         }
 
-        #modal-products-table tbody tr {
+        .row-section {
+            background-color: #f1f3f5 !important;
+        }
+
+        .row-section input {
+            font-weight: 700;
+            font-size: 0.94rem;
+            color: #212529;
+            background: transparent;
+            border-color: transparent;
+        }
+
+        .row-section input:focus {
+            background: #fff;
+            border-color: #86b7fe;
+        }
+
+        .row-note {
+            background-color: #fffef7 !important;
+        }
+
+        .row-note input {
+            font-style: italic;
+            color: #495057;
+            background: transparent;
+            border-color: transparent;
+        }
+
+        .row-note input:focus {
+            background: #fff;
+            border-color: #86b7fe;
+        }
+
+        .drag-handle {
+            cursor: grab;
+            color: #adb5bd;
+            font-size: 1.05rem;
+            user-select: none;
+        }
+
+        .drag-handle:hover {
+            color: #495057;
+        }
+
+        .sortable-ghost {
+            opacity: 0.45;
+            background-color: #cfe2ff !important;
+        }
+
+        #modal-products-table tbody tr,
+        #modal-quotations-table tbody tr {
             cursor: pointer;
         }
 
         .company-select-nav {
             max-width: 280px;
             font-weight: 600;
+        }
+
+        .odoo-link-btn {
+            color: #017e84;
+            font-weight: 600;
+            text-decoration: none;
+            cursor: pointer;
+            font-size: 0.84rem;
+        }
+
+        .odoo-link-btn:hover {
+            text-decoration: underline;
+            color: #015c61;
         }
     </style>
 </head>
@@ -77,6 +171,9 @@
                         {% endfor %}
                     </select>
                 </div>
+                <button class="btn btn-warning btn-sm fw-semibold ms-1" onclick="openLoadQuotationModal()">
+                    Cargar Cotización Previa
+                </button>
             </div>
             <div class="d-flex flex-wrap align-items-center gap-2 text-white small">
                 <span id="sync-badge" class="badge bg-info text-dark">Cargando estado...</span>
@@ -90,94 +187,178 @@
     </nav>
 
     <div class="container-fluid px-3 pb-4">
-        <!-- CABECERA DE COTIZACIÓN -->
-        <div class="card shadow-sm border-0 mb-3">
-            <div class="card-header bg-white fw-bold py-2 d-flex justify-content-between align-items-center">
-                <span>Datos de Cabecera (Cotización Borrador)</span>
-                <span id="header-company-label"
-                    class="badge bg-success-subtle text-success border border-success-subtle"></span>
+        <!-- BANNER DE MODO (NUEVA vs EDICIÓN DE COTIZACIÓN PREVIA) -->
+        <div id="editing-banner"
+            class="alert alert-warning py-2 px-3 mb-2 d-none d-flex justify-content-between align-items-center shadow-sm">
+            <div>
+                <span class="badge bg-dark me-2">MODO EDICIÓN</span>
+                Modificando cotización existente: <strong id="editing-order-title" class="fs-6"></strong>
             </div>
-            <div class="card-body py-3">
-                <div class="row g-2">
+            <button class="btn btn-outline-dark btn-sm fw-semibold" onclick="startNewQuotation()">
+                + Cambiar a Nueva Cotización
+            </button>
+        </div>
+
+        <!-- CABECERA ESTILO FICHA ODOO -->
+        <div class="odoo-sheet p-3 mb-3">
+            <div class="d-flex justify-content-between align-items-center border-bottom pb-2 mb-3">
+                <h5 id="sheet-title" class="mb-0 fw-bold text-dark">Nuevo Presupuesto (Borrador)</h5>
+                <span id="header-company-label"
+                    class="badge bg-success-subtle text-success border border-success-subtle fs-6"></span>
+            </div>
+
+            <div class="row g-4">
+                <!-- COLUMNA IZQUIERDA ODOO: CLIENTE + DIRECCIÓN FACTURA + DIRECCIÓN ENTREGA -->
+                <div class="col-12 col-lg-7">
                     <!-- CLIENTE -->
-                    <div class="col-12 col-md-4 position-relative">
-                        <label class="form-label small fw-bold mb-1">Cliente en Odoo *</label>
-                        <input type="text" id="customer-search" class="form-control form-control-sm"
-                            placeholder="Buscar cliente por nombre o CUIT..." autocomplete="off">
-                        <input type="hidden" id="selected-partner-id">
-                        <div id="customer-dropdown" class="list-group customer-results shadow d-none"></div>
-                        <div id="selected-customer-badge" class="mt-1 small text-success fw-semibold d-none"></div>
+                    <div class="row mb-3 align-items-start">
+                        <div class="col-12 col-sm-4 odoo-field-label pt-1">
+                            Cliente *
+                            <div class="text-muted fw-normal" style="font-size: 0.74rem;">Nombre, CUIT o Cód. Interno
+                            </div>
+                        </div>
+                        <div class="col-12 col-sm-8 position-relative">
+                            <!-- Buscador cuando no hay cliente elegido o se quiere cambiar -->
+                            <div id="customer-search-box">
+                                <input type="text" id="customer-search" class="form-control form-control-sm"
+                                    placeholder="Escribir nombre, CUIT o código interno (mín. 2 letras)..."
+                                    autocomplete="off">
+                                <div id="customer-dropdown" class="list-group customer-results shadow d-none"></div>
+                            </div>
+
+                            <!-- Tarjeta visual estilo Odoo cuando el cliente ya fue seleccionado -->
+                            <div id="customer-selected-card" class="odoo-customer-card d-none">
+                                <div class="d-flex justify-content-between align-items-start gap-2">
+                                    <div>
+                                        <div id="cust-card-name" class="fs-5 fw-bold text-dark lh-sm"></div>
+                                        <div class="mt-1 d-flex flex-wrap gap-2">
+                                            <span id="cust-card-code"
+                                                class="badge bg-secondary-subtle text-dark border d-none"></span>
+                                            <span id="cust-card-vat"
+                                                class="badge bg-light text-dark border d-none"></span>
+                                            <span id="cust-card-phone" class="small text-muted d-none"></span>
+                                        </div>
+                                        <div id="cust-card-address" class="small text-secondary mt-2"></div>
+                                    </div>
+                                    <button type="button" class="btn btn-outline-secondary btn-sm text-nowrap"
+                                        onclick="enableCustomerChange()">
+                                        Cambiar
+                                    </button>
+                                </div>
+                            </div>
+                            <input type="hidden" id="selected-partner-id">
+                        </div>
                     </div>
 
-                    <!-- TIPO DE PEDIDO -->
-                    <div class="col-6 col-md-2">
-                        <label class="form-label small fw-bold mb-1">Tipo de Pedido</label>
-                        <select id="order-type-select" class="form-select form-select-sm">
-                            <option value="">Cargando...</option>
-                        </select>
+                    <!-- DIRECCIÓN DE FACTURA -->
+                    <div class="row mb-3 align-items-start">
+                        <div class="col-12 col-sm-4 odoo-field-label pt-1">
+                            Dirección de factura
+                        </div>
+                        <div class="col-12 col-sm-8">
+                            <select id="invoice-address-select" class="form-select form-select-sm"
+                                onchange="updateAddressPreview('invoice')" disabled>
+                                <option value="">Seleccioná primero un cliente...</option>
+                            </select>
+                            <div id="invoice-address-preview" class="odoo-address-preview"></div>
+                        </div>
                     </div>
 
-                    <!-- RUTA -->
-                    <div class="col-6 col-md-2">
-                        <label class="form-label small fw-bold mb-1">Ruta</label>
-                        <select id="route-select" class="form-select form-select-sm">
-                            <option value="">Cargando...</option>
-                        </select>
+                    <!-- DIRECCIÓN DE ENTREGA -->
+                    <div class="row mb-1 align-items-start">
+                        <div class="col-12 col-sm-4 odoo-field-label pt-1">
+                            Dirección de entrega
+                        </div>
+                        <div class="col-12 col-sm-8">
+                            <select id="shipping-address-select" class="form-select form-select-sm"
+                                onchange="updateAddressPreview('shipping')" disabled>
+                                <option value="">Seleccioná primero un cliente...</option>
+                            </select>
+                            <div id="shipping-address-preview" class="odoo-address-preview"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- COLUMNA DERECHA ODOO: TIPO PEDIDO, RUTA, OC, REFERENCIA -->
+                <div class="col-12 col-lg-5">
+                    <div class="row mb-2 align-items-center">
+                        <div class="col-5 odoo-field-label">Tipo de Pedido</div>
+                        <div class="col-7">
+                            <select id="order-type-select" class="form-select form-select-sm">
+                                <option value="">Cargando...</option>
+                            </select>
+                        </div>
                     </div>
 
-                    <!-- ORDEN DE COMPRA -->
-                    <div class="col-6 col-md-2">
-                        <label class="form-label small fw-bold mb-1">Orden de Compra</label>
-                        <input type="text" id="purchase-order-number" class="form-control form-control-sm"
-                            placeholder="Nro OC cliente">
+                    <div class="row mb-2 align-items-center">
+                        <div class="col-5 odoo-field-label">Ruta</div>
+                        <div class="col-7">
+                            <select id="route-select" class="form-select form-select-sm">
+                                <option value="">Cargando...</option>
+                            </select>
+                        </div>
                     </div>
 
-                    <!-- REFERENCIA / NOTA -->
-                    <div class="col-6 col-md-2">
-                        <label class="form-label small fw-bold mb-1">Referencia / Nota Cliente</label>
-                        <input type="text" id="order-ref" class="form-control form-control-sm" placeholder="Opcional">
+                    <div class="row mb-2 align-items-center">
+                        <div class="col-5 odoo-field-label">Orden de Compra</div>
+                        <div class="col-7">
+                            <input type="text" id="purchase-order-number" class="form-control form-control-sm"
+                                placeholder="Nro OC cliente">
+                        </div>
+                    </div>
+
+                    <div class="row mb-2 align-items-center">
+                        <div class="col-5 odoo-field-label">Referencia / Nota</div>
+                        <div class="col-7">
+                            <input type="text" id="order-ref" class="form-control form-control-sm"
+                                placeholder="Referencia cliente">
+                        </div>
                     </div>
                 </div>
             </div>
         </div>
 
-        <!-- GRILLA DE LÍNEAS DE COTIZACIÓN -->
-        <div class="card shadow-sm border-0">
-            <div class="card-header bg-white d-flex justify-content-between align-items-center py-2">
-                <span class="fw-bold">Detalle de Productos</span>
-                <button class="btn btn-outline-primary btn-sm" onclick="addEmptyRow(true)">
-                    + Agregar Fila
-                </button>
+        <!-- GRILLA DE LÍNEAS DE COTIZACIÓN (PRODUCTOS, SECCIONES Y NOTAS) -->
+        <div class="odoo-sheet p-2">
+            <div class="d-flex justify-content-between align-items-center px-2 py-1 border-bottom mb-2">
+                <span class="fw-bold text-uppercase small text-secondary">Líneas del Pedido</span>
+                <span class="small text-muted">Arrastrá desde <strong>⠿</strong> para reordenar las líneas</span>
             </div>
-            <div class="card-body p-2">
-                <div class="table-responsive">
-                    <table class="table table-bordered table-sm mb-2">
-                        <thead id="quote-grid-head" class="table-light"></thead>
-                        <tbody id="quote-grid-body"></tbody>
-                    </table>
-                </div>
 
-                <div class="d-flex flex-wrap justify-content-between align-items-center border-top pt-3 px-2 gap-3">
-                    <div>
-                        <button class="btn btn-outline-secondary btn-sm" onclick="resetGrid()">Limpiar Grilla</button>
-                    </div>
-                    <div class="d-flex flex-wrap align-items-center gap-3">
-                        <div class="text-end">
-                            <span class="text-muted small d-block">Subtotal Neto (sin IVA)</span>
-                            <span id="grid-subtotal" class="fs-5 fw-bold text-dark">$ 0.00</span>
-                        </div>
-                        <button id="btn-send-odoo" class="btn btn-success fw-bold px-4" onclick="submitQuotation()">
-                            Enviar Cotización a Odoo (Borrador)
-                        </button>
-                    </div>
-                </div>
-
-                <div id="quote-alert" class="alert d-none small py-2 mt-3 mb-1"></div>
+            <div class="table-responsive">
+                <table class="table table-bordered table-sm mb-2">
+                    <thead id="quote-grid-head" class="table-light"></thead>
+                    <tbody id="quote-grid-body"></tbody>
+                </table>
             </div>
+
+            <!-- CONTROLES ESTILO ODOO DEBAJO DE LA GRILLA -->
+            <div class="d-flex flex-wrap gap-3 px-2 py-1 mb-2">
+                <span class="odoo-link-btn" onclick="addEmptyProductRow(true)">+ Agregar un producto</span>
+                <span class="odoo-link-btn" onclick="addSectionRow()">+ Agregar una sección</span>
+                <span class="odoo-link-btn" onclick="addNoteRow()">+ Agregar una nota</span>
+            </div>
+
+            <div class="d-flex flex-wrap justify-content-between align-items-center border-top pt-3 px-2 gap-3">
+                <div>
+                    <button class="btn btn-outline-secondary btn-sm" onclick="startNewQuotation()">Limpiar todo</button>
+                </div>
+                <div class="d-flex flex-wrap align-items-center gap-3">
+                    <div class="text-end">
+                        <span class="text-muted small d-block">Subtotal Neto (sin IVA)</span>
+                        <span id="grid-subtotal" class="fs-5 fw-bold text-dark">$ 0.00</span>
+                    </div>
+                    <button id="btn-send-odoo" class="btn btn-success fw-bold px-4" onclick="submitQuotation()">
+                        Enviar Cotización a Odoo (Borrador)
+                    </button>
+                </div>
+            </div>
+
+            <div id="quote-alert" class="alert d-none small py-2 mt-3 mb-1"></div>
         </div>
     </div>
 
-    <!-- MODAL BUSCADOR DE PRODUCTOS (DATATABLES CON SELECCIÓN MÚLTIPLE) -->
+    <!-- MODAL 1: BUSCADOR DE PRODUCTOS (DATATABLES CON SELECCIÓN MÚLTIPLE) -->
     <div class="modal fade" id="productSearchModal" tabindex="-1" aria-hidden="true">
         <div class="modal-dialog modal-xl modal-fullscreen-md-down modal-dialog-scrollable">
             <div class="modal-content">
@@ -198,8 +379,8 @@
                 <div class="modal-body p-2">
                     <div
                         class="alert alert-light border py-1 px-2 mb-2 small text-muted d-flex justify-content-between align-items-center">
-                        <span>Tildá uno o varios productos (podés realizar múltiples búsquedas seguidas) y presioná
-                            <strong>Insertar seleccionados</strong>, o hacé doble clic para insertar uno directo.</span>
+                        <span>Tildá uno o varios productos y presioná <strong>Insertar seleccionados</strong>, o hacé
+                            doble clic para insertar uno directo.</span>
                         <button type="button" class="btn btn-link btn-sm p-0 text-decoration-none"
                             onclick="clearModalSelection()">Limpiar selección</button>
                     </div>
@@ -222,22 +403,78 @@
         </div>
     </div>
 
+    <!-- MODAL 2: LEVANTAR COTIZACIÓN PREVIA DESDE ODOO -->
+    <div class="modal fade" id="loadQuotationModal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog modal-lg modal-dialog-scrollable">
+            <div class="modal-content">
+                <div class="modal-header py-2 bg-dark text-white">
+                    <h6 class="modal-title fw-bold mb-0">Cargar Cotización Previa (Borrador / Enviada)</h6>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"
+                        aria-label="Cerrar"></button>
+                </div>
+                <div class="modal-body p-3">
+                    <div class="input-group input-group-sm mb-3">
+                        <input type="text" id="prev-quote-search" class="form-control"
+                            placeholder="Buscar por número (ej. S00064), cliente, OC o referencia..."
+                            oninput="debouncedSearchQuotations()">
+                        <button class="btn btn-primary" type="button"
+                            onclick="fetchPreviousQuotations()">Buscar</button>
+                    </div>
+                    <div class="table-responsive">
+                        <table id="modal-quotations-table" class="table table-hover table-sm table-bordered mb-0">
+                            <thead class="table-light">
+                                <tr>
+                                    <th>Número</th>
+                                    <th>Fecha</th>
+                                    <th>Cliente</th>
+                                    <th>Referencia</th>
+                                    <th class="text-end">Total</th>
+                                    <th class="text-center">Estado</th>
+                                    <th class="text-center">Acción</th>
+                                </tr>
+                            </thead>
+                            <tbody id="prev-quotes-tbody">
+                                <tr>
+                                    <td colspan="7" class="text-center text-muted py-3">Cargando cotizaciones...</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
     <script src="https://cdn.datatables.net/1.13.8/js/jquery.dataTables.min.js"></script>
     <script src="https://cdn.datatables.net/1.13.8/js/dataTables.bootstrap5.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.2/Sortable.min.js"></script>
+
     <script>
         let allWarehouses = {{ warehouses | tojson }};
         let modalTable = null;
         let searchModal;
+        let loadQuoteModal;
         let activeRowIndex = 0;
         let customerTimer = null;
+        let quoteSearchTimer = null;
         let selectedProductsMap = new Map();
 
-        let rows = [createEmptyRowObj()];
+        // Estado del cliente y sus direcciones
+        let customerAddresses = [];
 
-        function createEmptyRowObj() {
+        // Estado de edición de cotización previa
+        let editingOrderId = null;
+        let editingOrderName = '';
+        let originalLineIds = [];
+
+        let rows = [createEmptyProductRowObj()];
+
+        function createEmptyProductRowObj() {
             return {
+                line_id: null,
+                row_type: 'product',
                 product_id: null,
                 default_code: '',
                 name: '',
@@ -264,10 +501,24 @@
 
         $(document).ready(function () {
             searchModal = new bootstrap.Modal(document.getElementById('productSearchModal'));
+            loadQuoteModal = new bootstrap.Modal(document.getElementById('loadQuotationModal'));
 
             document.getElementById('productSearchModal').addEventListener('shown.bs.modal', function () {
                 const input = $('#modal-products-table_filter input');
                 input.focus().select();
+            });
+
+            // Habilitar Drag & Drop en la grilla de líneas
+            Sortable.create(document.getElementById('quote-grid-body'), {
+                handle: '.drag-handle',
+                animation: 150,
+                ghostClass: 'sortable-ghost',
+                onEnd: function (evt) {
+                    if (evt.oldIndex === evt.newIndex) return;
+                    const moved = rows.splice(evt.oldIndex, 1)[0];
+                    rows.splice(evt.newIndex, 0, moved);
+                    renderGrid();
+                }
             });
 
             updateCompanyHeaderBadge();
@@ -285,18 +536,133 @@
         function onCompanyChange() {
             updateCompanyHeaderBadge();
             clearModalSelection();
-
-            // Limpiar cliente seleccionado al cambiar de empresa
-            $('#selected-partner-id').val('');
-            $('#customer-search').val('');
-            $('#customer-dropdown').addClass('d-none').empty();
-            $('#selected-customer-badge').addClass('d-none').text('');
-
+            resetCustomerState();
+            exitEditModeUI();
             loadQuotationOptions();
             initModalDataTable();
             renderGrid();
         }
 
+        // --- GESTIÓN DE CLIENTE Y DIRECCIONES (ESTILO ODOO) ---
+        function resetCustomerState() {
+            $('#selected-partner-id').val('');
+            $('#customer-search').val('');
+            $('#customer-dropdown').addClass('d-none').empty();
+            $('#customer-selected-card').addClass('d-none');
+            $('#customer-search-box').removeClass('d-none');
+            customerAddresses = [];
+
+            $('#invoice-address-select').html('<option value="">Seleccioná primero un cliente...</option>').prop('disabled', true);
+            $('#shipping-address-select').html('<option value="">Seleccioná primero un cliente...</option>').prop('disabled', true);
+            $('#invoice-address-preview').text('');
+            $('#shipping-address-preview').text('');
+        }
+
+        function enableCustomerChange() {
+            $('#customer-selected-card').addClass('d-none');
+            $('#customer-search-box').removeClass('d-none');
+            $('#customer-search').val('').focus();
+        }
+
+        $('#customer-search').on('input', function () {
+            clearTimeout(customerTimer);
+            const q = $(this).val().trim();
+            if (q.length < 2) {
+                $('#customer-dropdown').addClass('d-none').empty();
+                return;
+            }
+            customerTimer = setTimeout(() => {
+                $.get('/api/customers', { q, company_id: getSelectedCompanyId() }, function (list) {
+                    const dd = $('#customer-dropdown').empty();
+                    if (!list.length) {
+                        dd.append('<div class="list-group-item small text-muted">Sin resultados</div>').removeClass('d-none');
+                        return;
+                    }
+                    list.forEach(c => {
+                        const codeTag = c.internal_code ? `<span class="badge bg-secondary me-1">${escapeHtml(c.internal_code)}</span>` : '';
+                        const vatTag = c.vat ? `<span class="text-muted ms-1">(${escapeHtml(c.vat)})</span>` : '';
+                        const cityTag = c.city ? `<div class="text-muted" style="font-size:0.76rem;">${escapeHtml(c.street || '')} ${escapeHtml(c.city)}</div>` : '';
+
+                        const item = $(`<button type="button" class="list-group-item list-group-item-action py-1 px-2 text-start"></button>`)
+                            .html(`<div>${codeTag}<strong>${escapeHtml(c.name)}</strong>${vatTag}</div>${cityTag}`)
+                            .on('click', () => loadCustomerAndAddresses(c.id));
+                        dd.append(item);
+                    });
+                    dd.removeClass('d-none');
+                });
+            }, 300);
+        });
+
+        function loadCustomerAndAddresses(partnerId, preselectedInvoiceId = null, preselectedShippingId = null) {
+            $('#customer-dropdown').addClass('d-none').empty();
+            $.get(`/api/customers/${partnerId}`, { company_id: getSelectedCompanyId() }, function (bundle) {
+                applyCustomerBundle(bundle, preselectedInvoiceId, preselectedShippingId);
+            });
+        }
+
+        function applyCustomerBundle(bundle, preselectedInvoiceId = null, preselectedShippingId = null) {
+            const cust = bundle.customer;
+            customerAddresses = bundle.addresses || [cust];
+
+            $('#selected-partner-id').val(cust.id);
+            $('#cust-card-name').text(cust.name);
+
+            if (cust.internal_code) {
+                $('#cust-card-code').text('Cód: ' + cust.internal_code).removeClass('d-none');
+            } else {
+                $('#cust-card-code').addClass('d-none');
+            }
+
+            if (cust.vat) {
+                $('#cust-card-vat').text('CUIT: ' + cust.vat).removeClass('d-none');
+            } else {
+                $('#cust-card-vat').addClass('d-none');
+            }
+
+            if (cust.phone) {
+                $('#cust-card-phone').text('Tel: ' + cust.phone).removeClass('d-none');
+            } else {
+                $('#cust-card-phone').addClass('d-none');
+            }
+
+            $('#cust-card-address').html(
+                (cust.address_lines && cust.address_lines.length)
+                    ? cust.address_lines.map(l => escapeHtml(l)).join('<br>')
+                    : '<span class="fst-italic">Sin dirección cargada</span>'
+            );
+
+            $('#customer-search-box').addClass('d-none');
+            $('#customer-selected-card').removeClass('d-none');
+
+            // Poblar selectores de Dirección de Factura y Entrega
+            const invSel = $('#invoice-address-select').empty().prop('disabled', false);
+            const shipSel = $('#shipping-address-select').empty().prop('disabled', false);
+
+            customerAddresses.forEach(addr => {
+                const label = `${addr.name} [${addr.type_label}] — ${addr.address_text}`;
+                invSel.append(`<option value="${addr.id}">${escapeHtml(label)}</option>`);
+                shipSel.append(`<option value="${addr.id}">${escapeHtml(label)}</option>`);
+            });
+
+            invSel.val(preselectedInvoiceId || bundle.default_invoice_id || cust.id);
+            shipSel.val(preselectedShippingId || bundle.default_delivery_id || cust.id);
+
+            updateAddressPreview('invoice');
+            updateAddressPreview('shipping');
+        }
+
+        function updateAddressPreview(kind) {
+            const selId = parseInt(kind === 'invoice' ? $('#invoice-address-select').val() : $('#shipping-address-select').val());
+            const previewEl = kind === 'invoice' ? $('#invoice-address-preview') : $('#shipping-address-preview');
+            const found = customerAddresses.find(a => a.id === selId);
+            if (found) {
+                previewEl.text(found.address_text);
+            } else {
+                previewEl.text('');
+            }
+        }
+
+        // --- DATATABLES BUSCADOR DE PRODUCTOS ---
         function initModalDataTable() {
             if ($.fn.DataTable.isDataTable('#modal-products-table')) {
                 modalTable.destroy();
@@ -304,8 +670,6 @@
             }
 
             const compWarehouses = getCompanyWarehouses();
-
-            // Construir cabecera dinámica con código corto de cada almacén + Total
             let theadHtml = `
                 <thead class="table-light">
                     <tr>
@@ -393,7 +757,6 @@
                 }
             });
 
-            // Clic simple en la fila o checkbox: alterna selección múltiple
             $('#modal-products-table tbody').off('click', 'tr').on('click', 'tr', function (e) {
                 const data = modalTable.row(this).data();
                 if (!data) return;
@@ -417,7 +780,6 @@
                 updateSelectionCounter();
             });
 
-            // Doble clic: inserta ese producto directamente
             $('#modal-products-table tbody').off('dblclick', 'tr').on('dblclick', 'tr', function () {
                 const data = modalTable.row(this).data();
                 if (!data) return;
@@ -467,7 +829,10 @@
 
             let targetIdx = activeRowIndex;
             items.forEach((p, i) => {
+                const existingLineId = (i === 0 && rows[targetIdx]) ? rows[targetIdx].line_id : null;
                 const newRow = {
+                    line_id: existingLineId,
+                    row_type: 'product',
                     product_id: p.id,
                     default_code: p.default_code || 'S/C',
                     name: p.name || '',
@@ -478,7 +843,7 @@
                     stocks: p.stocks || {}
                 };
 
-                if (targetIdx < rows.length && rows[targetIdx].product_id === null) {
+                if (targetIdx < rows.length && rows[targetIdx].row_type === 'product' && rows[targetIdx].product_id === null) {
                     rows[targetIdx] = newRow;
                 } else if (i === 0 && targetIdx < rows.length) {
                     rows[targetIdx] = newRow;
@@ -488,9 +853,9 @@
                 targetIdx++;
             });
 
-            // Garantizar siempre una fila vacía al final para seguir cargando
-            if (rows[rows.length - 1].product_id !== null) {
-                rows.push(createEmptyRowObj());
+            const lastRow = rows[rows.length - 1];
+            if (!lastRow || lastRow.row_type !== 'product' || lastRow.product_id !== null) {
+                rows.push(createEmptyProductRowObj());
             }
 
             clearModalSelection();
@@ -502,12 +867,48 @@
             }, 150);
         }
 
-        function addEmptyRow(focusProduct = false) {
-            rows.push(createEmptyRowObj());
+        // --- FILAS DE PRODUCTO, SECCIÓN, NOTA Y REORDENAMIENTO ---
+        function addEmptyProductRow(focusProduct = false) {
+            rows.push(createEmptyProductRowObj());
             renderGrid();
             if (focusProduct) {
                 openProductModal(rows.length - 1);
             }
+        }
+
+        function addSectionRow() {
+            // Insertar antes de la última fila si está vacía
+            const insertAt = (rows.length > 0 && rows[rows.length - 1].row_type === 'product' && rows[rows.length - 1].product_id === null)
+                ? rows.length - 1
+                : rows.length;
+            rows.splice(insertAt, 0, {
+                line_id: null,
+                row_type: 'section',
+                name: ''
+            });
+            renderGrid();
+            setTimeout(() => $(`#text-input-${insertAt}`).focus(), 50);
+        }
+
+        function addNoteRow() {
+            const insertAt = (rows.length > 0 && rows[rows.length - 1].row_type === 'product' && rows[rows.length - 1].product_id === null)
+                ? rows.length - 1
+                : rows.length;
+            rows.splice(insertAt, 0, {
+                line_id: null,
+                row_type: 'note',
+                name: ''
+            });
+            renderGrid();
+            setTimeout(() => $(`#text-input-${insertAt}`).focus(), 50);
+        }
+
+        function moveRow(idx, delta) {
+            const newIdx = idx + delta;
+            if (newIdx < 0 || newIdx >= rows.length) return;
+            const moved = rows.splice(idx, 1)[0];
+            rows.splice(newIdx, 0, moved);
+            renderGrid();
         }
 
         function updateGridField(idx, field, val) {
@@ -522,37 +923,31 @@
         function removeGridRow(idx) {
             rows.splice(idx, 1);
             if (rows.length === 0) {
-                rows.push(createEmptyRowObj());
+                rows.push(createEmptyProductRowObj());
             }
             renderGrid();
         }
 
-        function resetGrid() {
-            rows = [createEmptyRowObj()];
-            renderGrid();
-            $('#quote-alert').addClass('d-none');
-        }
-
         function renderGrid() {
             const compWarehouses = getCompanyWarehouses();
+            const totalColsCount = 10 + compWarehouses.length;
 
-            // Cabecera dinámica de la grilla según almacenes de la empresa activa
             let headHtml = `
                 <tr>
-                    <th class="text-center" style="width: 50px;">Fila</th>
+                    <th class="text-center" style="width: 68px;">Orden</th>
                     <th style="width: 170px;">Producto</th>
                     <th style="min-width: 230px;">Detalle</th>
-                    <th style="width: 125px;">Marca</th>
+                    <th style="width: 120px;">Marca</th>
                     <th class="text-end" style="width: 80px;">Cantidad</th>
                     <th class="text-end" style="width: 110px;">Precio</th>
                     <th class="text-end" style="width: 70px;">Dto %</th>
                     <th class="text-end" style="width: 115px;">Subtotal</th>
             `;
             compWarehouses.forEach(wh => {
-                headHtml += `<th class="text-end bg-info-subtle" style="width: 70px;" title="${escapeHtml(wh.name)}">${escapeHtml(wh.code)}</th>`;
+                headHtml += `<th class="text-end bg-info-subtle" style="width: 68px;" title="${escapeHtml(wh.name)}">${escapeHtml(wh.code)}</th>`;
             });
             headHtml += `
-                    <th class="text-end bg-primary-subtle" style="width: 75px;">Total</th>
+                    <th class="text-end bg-primary-subtle" style="width: 72px;">Total</th>
                     <th class="text-center" style="width: 38px;"></th>
                 </tr>
             `;
@@ -562,6 +957,59 @@
             let totalNet = 0;
 
             rows.forEach((r, idx) => {
+                const orderCell = `
+                    <td class="text-center text-nowrap">
+                        <span class="drag-handle me-1" title="Arrastrar para reordenar">⠿</span>
+                        <span class="fw-bold text-muted me-1">${idx + 1}</span>
+                        <button type="button" class="btn btn-link btn-sm p-0 text-secondary text-decoration-none" onclick="moveRow(${idx}, -1)" title="Subir">↑</button>
+                        <button type="button" class="btn btn-link btn-sm p-0 text-secondary text-decoration-none" onclick="moveRow(${idx}, 1)" title="Bajar">↓</button>
+                    </td>
+                `;
+                const deleteCell = `
+                    <td class="text-center">
+                        <button type="button" class="btn btn-outline-danger btn-sm py-0 px-1" onclick="removeGridRow(${idx})" title="Quitar fila">×</button>
+                    </td>
+                `;
+
+                if (r.row_type === 'section') {
+                    tbody.append(`
+                        <tr class="row-section">
+                            ${orderCell}
+                            <td colspan="${totalColsCount - 2}">
+                                <div class="d-flex align-items-center gap-2">
+                                    <span class="badge bg-dark">SECCIÓN</span>
+                                    <input id="text-input-${idx}" type="text" class="form-control form-control-sm"
+                                           value="${escapeHtml(r.name)}"
+                                           placeholder="Nombre de la sección..."
+                                           onchange="updateGridField(${idx}, 'name', this.value)">
+                                </div>
+                            </td>
+                            ${deleteCell}
+                        </tr>
+                    `);
+                    return;
+                }
+
+                if (r.row_type === 'note') {
+                    tbody.append(`
+                        <tr class="row-note">
+                            ${orderCell}
+                            <td colspan="${totalColsCount - 2}">
+                                <div class="d-flex align-items-center gap-2">
+                                    <span class="badge bg-secondary">NOTA</span>
+                                    <input id="text-input-${idx}" type="text" class="form-control form-control-sm"
+                                           value="${escapeHtml(r.name)}"
+                                           placeholder="Texto de la nota..."
+                                           onchange="updateGridField(${idx}, 'name', this.value)">
+                                </div>
+                            </td>
+                            ${deleteCell}
+                        </tr>
+                    `);
+                    return;
+                }
+
+                // Fila normal de producto
                 const hasProd = r.product_id !== null;
                 const lineSubtotal = hasProd ? (r.qty * r.price_unit * (1 - (r.discount / 100))) : 0;
                 totalNet += lineSubtotal;
@@ -589,7 +1037,7 @@
 
                 tbody.append(`
                     <tr>
-                        <td class="text-center fw-bold text-muted">${idx + 1}</td>
+                        ${orderCell}
                         <td>
                             <div class="product-cell" tabindex="0"
                                  onclick="openProductModal(${idx})"
@@ -628,9 +1076,7 @@
                         </td>
                         ${stockCellsHtml}
                         ${totalStockCellHtml}
-                        <td class="text-center">
-                            <button class="btn btn-outline-danger btn-sm py-0 px-1" onclick="removeGridRow(${idx})" title="Quitar fila">×</button>
-                        </td>
+                        ${deleteCell}
                     </tr>
                 `);
             });
@@ -644,6 +1090,129 @@
                 .replace(/</g, '&lt;')
                 .replace(/>/g, '&gt;')
                 .replace(/"/g, '&quot;');
+        }
+
+        // --- LEVANTAR COTIZACIÓN PREVIA ---
+        function openLoadQuotationModal() {
+            $('#prev-quote-search').val('');
+            loadQuoteModal.show();
+            fetchPreviousQuotations();
+        }
+
+        function debouncedSearchQuotations() {
+            clearTimeout(quoteSearchTimer);
+            quoteSearchTimer = setTimeout(fetchPreviousQuotations, 300);
+        }
+
+        function fetchPreviousQuotations() {
+            const q = $('#prev-quote-search').val().trim();
+            const tbody = $('#prev-quotes-tbody').html('<tr><td colspan="7" class="text-center text-muted py-3">Buscando en Odoo...</td></tr>');
+
+            $.get('/api/quotations/search', { company_id: getSelectedCompanyId(), q }, function (orders) {
+                tbody.empty();
+                if (!orders.length) {
+                    tbody.append('<tr><td colspan="7" class="text-center text-muted py-3">No se encontraron cotizaciones abiertas en esta empresa.</td></tr>');
+                    return;
+                }
+                orders.forEach(o => {
+                    const pName = Array.isArray(o.partner_id) ? o.partner_id[1] : '';
+                    const stBadge = o.state === 'sent'
+                        ? '<span class="badge bg-info text-dark">Enviado</span>'
+                        : '<span class="badge bg-secondary">Borrador</span>';
+
+                    const tr = $(`
+                        <tr>
+                            <td class="fw-bold text-primary">${escapeHtml(o.name)}</td>
+                            <td class="small text-nowrap">${escapeHtml((o.date_order || '').slice(0, 16))}</td>
+                            <td class="small">${escapeHtml(pName)}</td>
+                            <td class="small text-muted">${escapeHtml(o.client_order_ref || '')}</td>
+                            <td class="text-end fw-semibold text-nowrap">$ ${parseFloat(o.amount_total || 0).toLocaleString('es-AR', { minimumFractionDigits: 2 })}</td>
+                            <td class="text-center">${stBadge}</td>
+                            <td class="text-center"><button class="btn btn-primary btn-sm py-0 px-2">Cargar</button></td>
+                        </tr>
+                    `);
+                    tr.on('click', () => loadQuotationIntoEditor(o.id));
+                    tbody.append(tr);
+                });
+            }).fail(function () {
+                tbody.html('<tr><td colspan="7" class="text-center text-danger py-3">Error al consultar cotizaciones en Odoo.</td></tr>');
+            });
+        }
+
+        function loadQuotationIntoEditor(orderId) {
+            const tbody = $('#prev-quotes-tbody').html('<tr><td colspan="7" class="text-center text-primary py-3">Cargando datos de la cotización...</td></tr>');
+            $.get(`/api/quotations/${orderId}`, { company_id: getSelectedCompanyId() }, function (data) {
+                loadQuoteModal.hide();
+
+                editingOrderId = data.order_id;
+                editingOrderName = data.order_name;
+                originalLineIds = (data.lines || []).filter(l => l.line_id).map(l => l.line_id);
+
+                $('#editing-order-title').text(data.order_name);
+                $('#editing-banner').removeClass('d-none');
+                $('#sheet-title').text(`Editando Cotización ${data.order_name}`);
+                $('#btn-send-odoo').text(`Guardar Cambios en ${data.order_name}`);
+                $('#quote-alert').addClass('d-none');
+
+                // Cargar cliente y direcciones exactas guardadas en la orden
+                applyCustomerBundle(data.customer_bundle, data.partner_invoice_id, data.partner_shipping_id);
+
+                // Cargar campos de cabecera
+                $('#order-type-select').val(data.type_id || '');
+                $('#route-select').val(data.route_id || '');
+                $('#purchase-order-number').val(data.purchase_order_number || '');
+                $('#order-ref').val(data.client_order_ref || '');
+
+                // Cargar líneas (productos, secciones y notas)
+                rows = (data.lines || []).map(ln => {
+                    if (ln.row_type === 'section' || ln.row_type === 'note') {
+                        return {
+                            line_id: ln.line_id,
+                            row_type: ln.row_type,
+                            name: ln.name || ''
+                        };
+                    }
+                    return {
+                        line_id: ln.line_id,
+                        row_type: 'product',
+                        product_id: ln.product_id,
+                        default_code: ln.default_code || 'S/C',
+                        name: ln.name || '',
+                        brand: ln.brand || '-',
+                        qty: parseFloat(ln.qty || 1),
+                        price_unit: parseFloat(ln.price_unit || 0),
+                        discount: parseFloat(ln.discount || 0),
+                        stocks: ln.stocks || {}
+                    };
+                });
+
+                rows.push(createEmptyProductRowObj());
+                renderGrid();
+            }).fail(function (xhr) {
+                const msg = xhr.responseJSON?.detail || 'No se pudo cargar la cotización.';
+                tbody.html(`<tr><td colspan="7" class="text-center text-danger py-3">${escapeHtml(msg)}</td></tr>`);
+            });
+        }
+
+        function exitEditModeUI() {
+            editingOrderId = null;
+            editingOrderName = '';
+            originalLineIds = [];
+            $('#editing-banner').addClass('d-none');
+            $('#sheet-title').text('Nuevo Presupuesto (Borrador)');
+            $('#btn-send-odoo').text('Enviar Cotización a Odoo (Borrador)');
+        }
+
+        function startNewQuotation() {
+            exitEditModeUI();
+            resetCustomerState();
+            $('#order-type-select').val('');
+            $('#route-select').val('');
+            $('#purchase-order-number').val('');
+            $('#order-ref').val('');
+            rows = [createEmptyProductRowObj()];
+            renderGrid();
+            $('#quote-alert').addClass('d-none');
         }
 
         // --- OPCIONES Y ESTADO SYNC ---
@@ -702,52 +1271,23 @@
             });
         }
 
-        // --- BUSCADOR DE CLIENTES ---
-        $('#customer-search').on('input', function () {
-            clearTimeout(customerTimer);
-            const q = $(this).val().trim();
-            if (q.length < 2) {
-                $('#customer-dropdown').addClass('d-none').empty();
-                return;
-            }
-            customerTimer = setTimeout(() => {
-                $.get('/api/customers', { q, company_id: getSelectedCompanyId() }, function (list) {
-                    const dd = $('#customer-dropdown').empty();
-                    if (!list.length) {
-                        dd.append('<div class="list-group-item small text-muted">Sin resultados</div>').removeClass('d-none');
-                        return;
-                    }
-                    list.forEach(c => {
-                        const vat = c.vat ? ` (${c.vat})` : '';
-                        const item = $(`<button type="button" class="list-group-item list-group-item-action small py-1"></button>`)
-                            .text(`${c.name}${vat}`)
-                            .on('click', () => selectCustomer(c.id, `${c.name}${vat}`));
-                        dd.append(item);
-                    });
-                    dd.removeClass('d-none');
-                });
-            }, 300);
-        });
-
-        function selectCustomer(id, label) {
-            $('#selected-partner-id').val(id);
-            $('#customer-search').val('');
-            $('#customer-dropdown').addClass('d-none').empty();
-            $('#selected-customer-badge').text('Cliente: ' + label).removeClass('d-none');
-        }
-
-        // --- ENVÍO A ODOO ---
+        // --- ENVÍO / ACTUALIZACIÓN EN ODOO ---
         function submitQuotation() {
             const companyId = getSelectedCompanyId();
             const partnerId = $('#selected-partner-id').val();
-            const customerName = $('#selected-customer-badge').text().replace('Cliente: ', '');
+            const invoiceId = $('#invoice-address-select').val();
+            const shippingId = $('#shipping-address-select').val();
+            const customerName = $('#cust-card-name').text();
             const typeVal = $('#order-type-select').val();
             const routeVal = $('#route-select').val();
             const poNumber = $('#purchase-order-number').val();
             const orderRef = $('#order-ref').val();
             const alertBox = $('#quote-alert');
 
-            const validLines = rows.filter(r => r.product_id !== null);
+            const validLines = rows.filter(r =>
+                (r.row_type === 'product' && r.product_id !== null) ||
+                ((r.row_type === 'section' || r.row_type === 'note') && (r.name || '').trim() !== '')
+            );
 
             if (!partnerId) {
                 alertBox.removeClass('d-none alert-success').addClass('alert-danger').text('Seleccioná un cliente de Odoo en la cabecera antes de enviar.');
@@ -759,15 +1299,20 @@
             }
 
             const btn = $('#btn-send-odoo');
-            btn.prop('disabled', true).text('Enviando a Odoo...');
+            const prevBtnText = btn.text();
+            btn.prop('disabled', true).text('Guardando en Odoo...');
 
             $.ajax({
                 url: '/api/quotations',
                 method: 'POST',
                 contentType: 'application/json',
                 data: JSON.stringify({
+                    order_id: editingOrderId,
+                    original_line_ids: originalLineIds,
                     company_id: companyId,
                     partner_id: parseInt(partnerId),
+                    partner_invoice_id: invoiceId ? parseInt(invoiceId) : parseInt(partnerId),
+                    partner_shipping_id: shippingId ? parseInt(shippingId) : parseInt(partnerId),
                     customer_name: customerName,
                     type_id: typeVal ? parseInt(typeVal) : null,
                     route_id: routeVal ? parseInt(routeVal) : null,
@@ -777,19 +1322,24 @@
                 }),
                 success: function (res) {
                     alertBox.removeClass('d-none alert-danger').addClass('alert-success').html(
-                        `Cotización <strong>${res.order_name}</strong> creada en borrador en <strong>${escapeHtml(getSelectedCompanyName())}</strong> ` +
+                        `Cotización <strong>${res.order_name}</strong> ${res.action_label} con éxito en <strong>${escapeHtml(getSelectedCompanyName())}</strong> ` +
                         `(Total c/imp: $ ${res.amount_total.toLocaleString('es-AR', { minimumFractionDigits: 2 })}). ` +
                         `<a href="${res.odoo_link}" target="_blank" class="fw-bold">Abrir en Odoo →</a>`
                     );
-                    rows = [createEmptyRowObj()];
+                    exitEditModeUI();
+                    rows = [createEmptyProductRowObj()];
                     renderGrid();
                 },
                 error: function (xhr) {
                     const msg = xhr.responseJSON?.detail || 'Error al conectar con Odoo.';
                     alertBox.removeClass('d-none alert-success').addClass('alert-danger').text(msg);
+                    btn.text(prevBtnText);
                 },
                 complete: function () {
-                    btn.prop('disabled', false).text('Enviar Cotización a Odoo (Borrador)');
+                    btn.prop('disabled', false);
+                    if (!editingOrderId) {
+                        btn.text('Enviar Cotización a Odoo (Borrador)');
+                    }
                 }
             });
         }

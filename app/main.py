@@ -14,6 +14,7 @@ from app.database import (
     query_products_datatables,
     get_sync_status,
     get_all_warehouses,
+    get_products_by_ids,
     log_quotation,
 )
 from app.odoo_sync import run_full_sync
@@ -21,7 +22,10 @@ from app.odoo_client import (
     authenticate_odoo_user,
     get_all_companies,
     search_customers,
-    create_draft_quotation,
+    get_customer_details,
+    search_quotations,
+    get_quotation_details,
+    save_quotation,
     get_quotation_options,
 )
 
@@ -70,14 +74,12 @@ def login_submit(request: Request, username: str = Form(...), password: str = Fo
             status_code=429,
         )
 
-    # 1. Validar contra usuarios reales de Odoo
     odoo_user, error_msg = authenticate_odoo_user(username, password)
     if odoo_user:
         login_attempts.pop(client_ip, None)
         request.session["user"] = odoo_user
         return RedirectResponse(url="/", status_code=302)
 
-    # 2. Respaldo de administrador local si está configurado en Coolify
     expected_user = os.getenv("APP_USER", "")
     expected_pass = os.getenv("APP_PASSWORD", "")
     if expected_user and expected_pass and username == expected_user and password == expected_pass:
@@ -191,16 +193,63 @@ def api_customers(company_id: int, q: str = "", user: dict = Depends(get_current
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/api/customers/{partner_id}")
+def api_customer_details(partner_id: int, company_id: int, user: dict = Depends(get_current_user)):
+    allowed = validate_user_company(user, company_id)
+    try:
+        details = get_customer_details(partner_id, company_id, allowed)
+        return JSONResponse(details)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/quotations/search")
+def api_search_quotations(company_id: int, q: str = "", user: dict = Depends(get_current_user)):
+    allowed = validate_user_company(user, company_id)
+    try:
+        orders = search_quotations(q, company_id, allowed)
+        return JSONResponse(orders)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/quotations/{order_id}")
+def api_get_quotation(order_id: int, company_id: int, user: dict = Depends(get_current_user)):
+    allowed = validate_user_company(user, company_id)
+    try:
+        q_data = get_quotation_details(order_id, company_id, allowed)
+        # Enriquecer cada producto con su código, marca y stock local desde SQLite
+        prod_ids = [ln["product_id"] for ln in q_data["lines"] if ln.get("row_type") == "product" and ln.get("product_id")]
+        local_prods = get_products_by_ids(prod_ids)
+
+        for ln in q_data["lines"]:
+            if ln.get("row_type") == "product":
+                pid = ln.get("product_id")
+                lp = local_prods.get(pid, {})
+                lbl = ln.get("product_label") or ""
+                code_fallback = lbl.split("]")[0].lstrip("[") if lbl.startswith("[") else "S/C"
+                ln["default_code"] = lp.get("default_code") or code_fallback
+                ln["brand"] = lp.get("brand") or "-"
+                ln["stocks"] = lp.get("stocks") or {}
+
+        return JSONResponse(q_data)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 class QuotationLineIn(BaseModel):
-    product_id: int
+    line_id: Optional[int] = None
+    row_type: str = "product"  # 'product' | 'section' | 'note'
+    product_id: Optional[int] = None
     name: str = ""
-    qty: float
-    price_unit: float
+    qty: float = 1.0
+    price_unit: float = 0.0
     discount: float = 0.0
 
-class QuotationCreateIn(BaseModel):
+class QuotationSaveIn(BaseModel):
+    order_id: Optional[int] = None
+    original_line_ids: List[int] = []
     company_id: int
     partner_id: int
+    partner_invoice_id: Optional[int] = None
+    partner_shipping_id: Optional[int] = None
     customer_name: str
     type_id: Optional[int] = None
     route_id: Optional[int] = None
@@ -209,31 +258,43 @@ class QuotationCreateIn(BaseModel):
     lines: List[QuotationLineIn]
 
 @app.post("/api/quotations")
-def api_create_quotation(payload: QuotationCreateIn, user: dict = Depends(get_current_user)):
+def api_save_quotation(payload: QuotationSaveIn, user: dict = Depends(get_current_user)):
     allowed = validate_user_company(user, payload.company_id)
-    if not payload.lines:
-        raise HTTPException(status_code=400, detail="La cotización debe tener al menos un producto.")
+    valid_lines = [
+        ln.model_dump()
+        for ln in payload.lines
+        if (ln.row_type == "product" and ln.product_id is not None)
+        or (ln.row_type in ("section", "note") and ln.name.strip())
+    ]
+    if not valid_lines:
+        raise HTTPException(status_code=400, detail="La cotización debe tener al menos un producto o línea válida.")
+
     try:
-        res = create_draft_quotation(
+        res = save_quotation(
             company_id=payload.company_id,
             allowed_company_ids=allowed,
             partner_id=payload.partner_id,
-            lines=[line.model_dump() for line in payload.lines],
+            partner_invoice_id=payload.partner_invoice_id or payload.partner_id,
+            partner_shipping_id=payload.partner_shipping_id or payload.partner_id,
+            lines=valid_lines,
             creator_user=user,
+            order_id=payload.order_id,
+            original_line_ids=payload.original_line_ids,
             type_id=payload.type_id,
             route_id=payload.route_id,
             purchase_order_number=payload.purchase_order_number,
             client_order_ref=payload.client_order_ref,
         )
+        prod_count = sum(1 for ln in valid_lines if ln["row_type"] == "product")
         log_quotation(
             username=user.get("login", "desconocido"),
             company_id=payload.company_id,
             order_id=res["order_id"],
             order_name=res["order_name"],
             customer_name=payload.customer_name,
-            items_count=len(payload.lines),
+            items_count=prod_count,
             amount_total=res["amount_total"],
         )
         return JSONResponse({"ok": True, **res})
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error al crear cotización en Odoo: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error al guardar cotización en Odoo: {str(e)}")
