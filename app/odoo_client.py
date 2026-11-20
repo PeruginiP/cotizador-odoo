@@ -568,7 +568,7 @@ def get_quotation_details(order_id: int, company_id: int, allowed_company_ids: l
             "sale.order.line", "read",
             [line_ids],
             {
-                "fields": ["id", "sequence", "display_type", "product_id", "name", "product_uom_qty", "price_unit", "discount"],
+                "fields": ["id", "sequence", "display_type", "product_id", "name", "product_uom_qty", "price_unit", "discount", "tax_id"],
                 "context": ctx,
             },
         )
@@ -679,6 +679,7 @@ def save_quotation(
                 "price_unit": float(line["price_unit"]),
                 "discount": float(line.get("discount", 0.0)),
                 "sequence": seq,
+                "tax_id": [(6, 0, line.get("tax_ids") or [])],
             }
             if line.get("name"):
                 vals["name"] = str(line["name"])

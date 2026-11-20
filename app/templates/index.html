@@ -448,13 +448,25 @@
                 <div>
                     <button class="btn btn-outline-secondary btn-sm" onclick="startNewQuotation()">Limpiar todo</button>
                 </div>
-                <div class="d-flex flex-wrap align-items-center gap-3">
-                    <div class="text-end">
-                        <span class="small d-block" style="color: #333333;">Subtotal Neto (sin IVA)</span>
-                        <span id="grid-subtotal" class="fs-5 fw-bold" style="color: #000000;">$ 0.00</span>
+                <div class="d-flex flex-wrap align-items-center gap-4">
+                    <div class="d-flex flex-column text-end">
+                        <div class="d-flex justify-content-end align-items-center gap-3 mb-1">
+                            <span class="small" style="color: #333333;">Subtotal Neto:</span>
+                            <span id="grid-subtotal" class="fw-bold" style="color: #000000; width: 110px;">$ 0.00</span>
+                        </div>
+                        <div class="d-flex justify-content-end align-items-center gap-3 mb-1">
+                            <span class="small" style="color: #333333;">Impuestos:</span>
+                            <span id="grid-tax" class="fw-bold" style="color: #000000; width: 110px;">$ 0.00</span>
+                        </div>
+                        <div class="d-flex justify-content-end align-items-center gap-3 border-top pt-1 mt-1">
+                            <span class="fw-bold" style="color: #2f3787;">Total Final:</span>
+                            <span id="grid-total" class="fs-5 fw-bold" style="color: #2f3787; width: 110px;">$
+                                0.00</span>
+                        </div>
                     </div>
-                    <button id="btn-send-odoo" class="btn btn-brand fw-bold px-4" onclick="submitQuotation()">
-                        Enviar Cotización a Odoo (Borrador)
+                    <button id="btn-send-odoo" class="btn btn-brand fw-bold px-4 py-2 h-100"
+                        onclick="submitQuotation()">
+                        Enviar Cotización<br>a Odoo (Borrador)
                     </button>
                 </div>
             </div>
@@ -680,7 +692,8 @@
                 qty: 1,
                 price_unit: 0,
                 discount: 0,
-                stocks: null
+                stocks: null,
+                taxes: []
             };
         }
 
@@ -1036,7 +1049,7 @@
                     className: 'text-end text-nowrap',
                     render: d => '$ ' + parseFloat(d || 0).toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
                 },
-                { data: 'taxes_id', orderable: false, className: 'small' },
+                { data: 'taxes_display', orderable: false, className: 'small' },
                 { data: 'barcode_ids', className: 'small' },
                 { data: 'estado', className: 'small' }
             ];
@@ -1168,7 +1181,8 @@
                     qty: (i === 0 && rows[targetIdx] && rows[targetIdx].qty) ? rows[targetIdx].qty : 1,
                     price_unit: parseFloat(p.list_price || 0),
                     discount: (i === 0 && rows[targetIdx] && rows[targetIdx].discount) ? rows[targetIdx].discount : 0,
-                    stocks: p.stocks || {}
+                    stocks: p.stocks || {},
+                    taxes: p.taxes || []
                 };
 
                 if (targetIdx < rows.length && rows[targetIdx].row_type === 'product' && rows[targetIdx].product_id === null) {
@@ -1271,11 +1285,25 @@
         function recalculateAllTotalsInPlace() {
             const sym = escapeHtml(getActiveCurrencySymbol());
             let totalNet = 0;
+            let totalTax = 0;
 
             rows.forEach((r, idx) => {
                 if (r.row_type === 'product' && r.product_id !== null) {
                     const lineSubtotal = r.qty * r.price_unit * (1 - (r.discount / 100));
                     totalNet += lineSubtotal;
+
+                    let lineTax = 0;
+                    if (r.taxes && r.taxes.length) {
+                        r.taxes.forEach(t => {
+                            if (t.type === 'percent') {
+                                lineTax += lineSubtotal * (t.amount / 100);
+                            } else {
+                                lineTax += t.amount * r.qty;
+                            }
+                        });
+                    }
+                    totalTax += lineTax;
+
                     const cellEl = $(`#row-subtotal-${idx}`);
                     if (cellEl.length) {
                         cellEl.text(`${sym} ${lineSubtotal.toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`);
@@ -1283,7 +1311,10 @@
                 }
             });
 
+            const totalFinal = totalNet + totalTax;
             $('#grid-subtotal').text(`${sym} ${totalNet.toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`);
+            $('#grid-tax').text(`${sym} ${totalTax.toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`);
+            $('#grid-total').text(`${sym} ${totalFinal.toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`);
         }
 
         function removeGridRow(idx) {
@@ -1308,6 +1339,7 @@
                     <th class="text-end" style="width: 80px;">Cantidad</th>
                     <th class="text-end" style="width: 110px;">Precio (${sym})</th>
                     <th class="text-end" style="width: 70px;">Dto %</th>
+                    <th class="text-end" style="width: 70px;">IVA</th>
                     <th class="text-end" style="width: 120px;">Subtotal</th>
             `;
             compWarehouses.forEach(wh => {
@@ -1441,7 +1473,10 @@
                                    onkeydown="handleGridTabKey(event)"
                                    oninput="updateGridFieldInPlace(${idx}, 'discount', this.value)">
                         </td>
-                        <td id="row-subtotal-${idx}" class="text-end fw-bold text-nowrap">
+                        <td class="text-end align-middle">
+                            ${hasProd ? (r.taxes && r.taxes.length ? r.taxes.map(t => `<span class="badge border" style="background-color:#eef3f8; color:#2f3787;">${t.type === 'percent' ? t.amount + '%' : '$' + t.amount}</span>`).join(' ') : '-') : '-'}
+                        </td>
+                        <td id="row-subtotal-${idx}" class="text-end fw-bold text-nowrap align-middle">
                             ${sym} ${lineSubtotal.toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                         </td>
                         ${stockCellsHtml}
@@ -1669,7 +1704,8 @@
                         qty: parseFloat(ln.qty || 1),
                         price_unit: parseFloat(ln.price_unit || 0),
                         discount: parseFloat(ln.discount || 0),
-                        stocks: ln.stocks || {}
+                        stocks: ln.stocks || {},
+                        taxes: ln.taxes || []
                     };
                 });
 
@@ -1792,7 +1828,10 @@
             const validLines = rows.filter(r =>
                 (r.row_type === 'product' && r.product_id !== null) ||
                 ((r.row_type === 'section' || r.row_type === 'note') && (r.name || '').trim() !== '')
-            );
+            ).map(r => ({
+                ...r,
+                tax_ids: r.taxes ? r.taxes.map(t => t.id) : []
+            }));
 
             if (!partnerId) {
                 alertBox.removeClass('d-none alert-success').addClass('alert-danger').text('Seleccioná un cliente de Odoo en la cabecera antes de enviar.');

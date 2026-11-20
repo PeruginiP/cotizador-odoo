@@ -602,7 +602,7 @@ def compute_prices_from_local_pricelist(company_id: int, pricelist_id: int, item
     finally:
         conn.close()
 
-def get_products_by_ids(product_ids: list):
+def get_products_by_ids(product_ids: list, company_id: int):
     if not product_ids:
         return {}
     unique_ids = list({int(pid) for pid in product_ids if pid})
@@ -613,7 +613,7 @@ def get_products_by_ids(product_ids: list):
     try:
         placeholders = ",".join("?" for _ in unique_ids)
         rows = conn.execute(
-            f"SELECT id, default_code, name, list_price, brand FROM products WHERE id IN ({placeholders})",
+            f"SELECT id, default_code, name, list_price, brand, taxes_json FROM products WHERE id IN ({placeholders})",
             unique_ids,
         ).fetchall()
 
@@ -625,14 +625,19 @@ def get_products_by_ids(product_ids: list):
         for sr in st_rows:
             stock_map.setdefault(int(sr["product_id"]), {})[str(sr["warehouse_id"])] = float(sr["free_qty"])
 
+        comp_key = str(company_id)
         result = {}
         for r in rows:
             pid = int(r["id"])
+            taxes_map = json.loads(r["taxes_json"] or "{}")
+            taxes_list = taxes_map.get(comp_key, [])
+            
             result[pid] = {
                 "id": pid,
                 "default_code": r["default_code"] or "",
                 "name": r["name"] or "",
                 "list_price": float(r["list_price"] or 0.0),
+                "taxes": taxes_list,
                 "brand": r["brand"] or "",
                 "stocks": stock_map.get(pid, {}),
             }
@@ -767,6 +772,16 @@ def query_products_datatables(
         for r in rows:
             pid = int(r["id"])
             taxes_map = json.loads(r["taxes_json"] or "{}")
+            taxes_list = taxes_map.get(comp_key, [])
+            
+            display_arr = []
+            for t in taxes_list:
+                amt = t["amount"]
+                if t.get("type") == "percent":
+                    display_arr.append(f"{amt:g}%")
+                else:
+                    display_arr.append(f"${amt:g}")
+
             p_stocks = stock_by_prod.get(pid, {})
             total_company_stock = round(sum(p_stocks.get(str(wid), 0.0) for wid in company_wh_ids), 4)
 
@@ -775,7 +790,8 @@ def query_products_datatables(
                 "default_code": r["default_code"] or "",
                 "name": r["name"] or "",
                 "list_price": float(r["list_price"] or 0.0),
-                "taxes_id": taxes_map.get(comp_key, ""),
+                "taxes": taxes_list,
+                "taxes_display": ", ".join(display_arr),
                 "brand": r["brand"] or "",
                 "barcode_ids": r["barcode_ids"] or "",
                 "estado": r["estado"] or "",

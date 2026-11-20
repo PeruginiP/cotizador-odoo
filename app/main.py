@@ -274,7 +274,7 @@ def api_get_quotation(order_id: int, company_id: int, user: dict = Depends(get_c
     try:
         q_data = get_quotation_details(order_id, company_id, allowed)
         prod_ids = [ln["product_id"] for ln in q_data["lines"] if ln.get("row_type") == "product" and ln.get("product_id")]
-        local_prods = get_products_by_ids(prod_ids)
+        local_prods = get_products_by_ids(prod_ids, company_id)
 
         for ln in q_data["lines"]:
             if ln.get("row_type") == "product":
@@ -285,6 +285,7 @@ def api_get_quotation(order_id: int, company_id: int, user: dict = Depends(get_c
                 ln["default_code"] = lp.get("default_code") or code_fallback
                 ln["brand"] = lp.get("brand") or "-"
                 ln["stocks"] = lp.get("stocks") or {}
+                ln["taxes"] = lp.get("taxes") or []
 
         return JSONResponse(q_data)
     except Exception as e:
@@ -298,6 +299,7 @@ class QuotationLineIn(BaseModel):
     qty: float = 1.0
     price_unit: float = 0.0
     discount: float = 0.0
+    tax_ids: List[int] = []
 
 class QuotationSaveIn(BaseModel):
     order_id: Optional[int] = None

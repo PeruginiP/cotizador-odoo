@@ -46,11 +46,22 @@ def run_full_sync():
         def execute_kw(model, method, args, kwargs=None):
             return get_models().execute_kw(db, uid, password, model, method, args, kwargs or {})
 
-        # 0. Compañías y tipos de cambio por compañía
-        companies = execute_kw("res.company", "search_read", [[]], {"fields": ["id", "name", "currency_id"]})
+        # 0. Compañías, tipos de cambio y herencia (branches)
+        companies = execute_kw("res.company", "search_read", [[]], {"fields": ["id", "name", "currency_id", "parent_id"]})
         all_company_ids = [c["id"] for c in companies]
         company_name_map = {c["id"]: c["name"] for c in companies}
         multi_ctx = {"allowed_company_ids": all_company_ids}
+
+        # Mapa de descendientes para heredar impuestos (la compañía padre presta sus impuestos a las hijas)
+        def get_descendants(cid):
+            desc = [cid]
+            for c in companies:
+                pid_field = c.get("parent_id")
+                if pid_field and pid_field[0] == cid:
+                    desc.extend(get_descendants(c["id"]))
+            return desc
+        
+        comp_descendants = {c["id"]: set(get_descendants(c["id"])) for c in companies}
 
         def leer_en_paralelo(model, ids, fields, batch_size=BATCH_SIZE):
             if not ids:
@@ -66,7 +77,6 @@ def run_full_sync():
                     resultados.extend(future.result())
             return resultados
 
-        # 1. Monedas, listas de precios, categorías y almacenes
         report("Descargando monedas, listas de precios y almacenes...")
         currency_rows = []
         for comp in companies:
@@ -159,7 +169,6 @@ def run_full_sync():
         raw_categs = execute_kw("product.category", "search_read", [[]], {"fields": ["id", "parent_path"], "context": multi_ctx})
         category_rows = [(int(c["id"]), c.get("parent_path") or "") for c in raw_categs]
 
-        # Metadatos de producto
         studio_field = "x_studio_selection_field_6ua_1j8tii7sp"
         all_prod_fields = execute_kw(
             "product.product",
@@ -194,7 +203,6 @@ def run_full_sync():
             {"fields": ["id", "name", "code", "company_id", "lot_stock_id"], "context": multi_ctx},
         )
 
-        # 2. Stock disponible sin reservar (lot_stock_id) en TODOS los almacenes
         report(f"Calculando stock en {len(almacenes_info)} almacenes...")
         warehouse_rows = []
         stock_rows = []
@@ -231,7 +239,6 @@ def run_full_sync():
                     if free_qty != 0.0:
                         stock_rows.append((prod_id, wh_id, free_qty))
 
-        # 3. Productos en paralelo
         product_ids = execute_kw("product.product", "search", [[]], {"context": multi_ctx})
         report(f"Descargando {len(product_ids):,} productos en paralelo...")
 
@@ -252,15 +259,21 @@ def run_full_sync():
 
         productos_raw = leer_en_paralelo("product.product", product_ids, campos_lectura)
 
-        # 4. Impuestos por compañía y códigos de barra
         report("Resolviendo impuestos por compañía y códigos de barra...")
         all_tax_ids = list({tid for p in productos_raw for tid in p.get("taxes_id", [])})
-        taxes_records = leer_en_paralelo("account.tax", all_tax_ids, ["name", "company_id"], batch_size=5000)
+        
+        # Traemos name, company_id, amount (el %) y amount_type
+        taxes_records = leer_en_paralelo("account.tax", all_tax_ids, ["name", "company_id", "amount", "amount_type"], batch_size=5000)
         taxes_info_map = {}
         for t in taxes_records:
             c_info = t.get("company_id")
             if c_info:
-                taxes_info_map[t["id"]] = (str(c_info[0]), t["name"])
+                taxes_info_map[t["id"]] = {
+                    "company_id": int(c_info[0]),
+                    "name": t["name"],
+                    "amount": float(t.get("amount") or 0.0),
+                    "type": t.get("amount_type") or "percent"
+                }
 
         all_barcode_ids = list({bid for p in productos_raw for bid in p.get("barcode_ids", [])})
         barcodes_map = {}
@@ -268,7 +281,6 @@ def run_full_sync():
             bc_records = leer_en_paralelo(barcode_rel_model, all_barcode_ids, [barcode_code_field], batch_size=5000)
             barcodes_map = {b["id"]: str(b[barcode_code_field]) for b in bc_records if b.get(barcode_code_field)}
 
-        # 5. Guardar todo en SQLite
         report("Guardando índice y listas de precios en base local...")
         product_rows = []
         for p in productos_raw:
@@ -281,18 +293,26 @@ def run_full_sync():
                 elif isinstance(b_val, str):
                     marca = b_val
 
+            # Agrupar impuestos propagando la herencia hacia las empresas hijas
             taxes_by_comp = {}
             for tid in p.get("taxes_id", []):
-                if tid in taxes_info_map:
-                    c_str, t_name = taxes_info_map[tid]
-                    taxes_by_comp.setdefault(c_str, []).append(t_name)
-            taxes_json = json.dumps({k: ", ".join(v) for k, v in taxes_by_comp.items()})
+                t_info = taxes_info_map.get(tid)
+                if t_info:
+                    tax_c = t_info["company_id"]
+                    valid_comps = comp_descendants.get(tax_c, {tax_c})
+                    for vc in valid_comps:
+                        taxes_by_comp.setdefault(str(vc), []).append({
+                            "id": tid,
+                            "amount": t_info["amount"],
+                            "name": t_info["name"],
+                            "type": t_info["type"]
+                        })
+            
+            taxes_json = json.dumps(taxes_by_comp)
 
             codigos_barra = ", ".join(barcodes_map[bid] for bid in p.get("barcode_ids", []) if bid in barcodes_map)
-
             estado_raw = p.get(studio_field)
             estado = estado_selection_map.get(estado_raw, estado_raw) if estado_raw else ""
-
             tmpl_info = p.get("product_tmpl_id")
             cat_info = p.get("categ_id")
             pcurr_info = p.get("currency_id")
