@@ -689,7 +689,7 @@
                 default_code: '',
                 name: '',
                 brand: '',
-                qty: 1,
+                qty: 0,
                 price_unit: 0,
                 discount: 0,
                 stocks: null,
@@ -1178,7 +1178,7 @@
                     default_code: p.default_code || 'S/C',
                     name: p.name || '',
                     brand: p.brand || '-',
-                    qty: (i === 0 && rows[targetIdx] && rows[targetIdx].qty) ? rows[targetIdx].qty : 1,
+                    qty: (i === 0 && rows[targetIdx] && rows[targetIdx].qty) ? rows[targetIdx].qty : 0,
                     price_unit: parseFloat(p.list_price || 0),
                     discount: (i === 0 && rows[targetIdx] && rows[targetIdx].discount) ? rows[targetIdx].discount : 0,
                     stocks: p.stocks || {},
@@ -1327,7 +1327,7 @@
 
         function renderGrid() {
             const compWarehouses = getCompanyWarehouses();
-            const totalColsCount = 10 + compWarehouses.length;
+            const totalColsCount = 11 + compWarehouses.length;
             const sym = escapeHtml(getActiveCurrencySymbol());
 
             let headHtml = `
@@ -1450,7 +1450,7 @@
                         </td>
                         <td class="small fw-semibold">${hasProd ? escapeHtml(r.brand) : '-'}</td>
                         <td>
-                            <input id="qty-input-${idx}" type="number" step="1" min="0.01"
+                            <input id="qty-input-${idx}" type="number" step="1" min="0"
                                    class="form-control form-control-sm text-end grid-nav-input"
                                    value="${r.qty}" ${hasProd ? '' : 'disabled'}
                                    onfocus="this.select()"
@@ -1486,7 +1486,7 @@
                 `);
             });
 
-            $('#grid-subtotal').text(`${sym} ${totalNet.toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`);
+            recalculateAllTotalsInPlace();
         }
 
         function escapeHtml(text) {
@@ -1838,8 +1838,11 @@
                 return;
             }
             if (!validLines.length) {
-                alertBox.removeClass('d-none alert-success').addClass('alert-danger').text('Cargá al menos un producto en la grilla.');
-                return;
+                const zeroQtyLines = validLines.filter(r => r.row_type === 'product' && (!r.qty || r.qty <= 0));
+                if (zeroQtyLines.length) {
+                    alertBox.removeClass('d-none alert-success').addClass('alert-danger').text('Hay productos con cantidad en 0. Completá las cantidades antes de enviar a Odoo.');
+                    return;
+                }
             }
 
             const btn = $('#btn-send-odoo');
