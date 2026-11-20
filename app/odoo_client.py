@@ -57,10 +57,7 @@ def _extract_m2o_id(val):
 
 
 def _resolve_partner_property_id(models, db, uid, password, field_name: str, partner_ids: list, hierarchy_ids: list):
-    """
-    Lee propiedades company_dependent=True (como res.partner.sale_type) desde ir.property
-    priorizando: sucursal actual -> empresa padre -> global (company_id=False).
-    """
+    """Fallback directo sobre ir.property para campos company_dependent=True."""
     res_refs = [f"res.partner,{int(pid)}" for pid in partner_ids if pid]
     if not res_refs:
         return None
@@ -410,9 +407,6 @@ def compute_pricelist_prices_odoo_fallback(
     items: list,
     partner_id: int = None,
 ):
-    """
-    Fallback directo contra product.pricelist._get_product_price en Odoo 16 si SQLite aún no fue sincronizado.
-    """
     if not items or not pricelist_id:
         return {}
 
@@ -552,14 +546,29 @@ def get_customer_details(partner_id: int, company_id: int, allowed_company_ids: 
     comm_id = _extract_m2o_id(main_p.get("commercial_partner_id")) or int(partner_id)
     candidate_pids = [int(partner_id)] + ([comm_id] if comm_id != int(partner_id) else [])
 
-    # 1. Resolver res.partner.sale_type desde ir.property (sucursal -> empresa padre -> global)
-    default_order_type_id = None
-    if has_sale_type:
-        default_order_type_id = _resolve_partner_property_id(
-            models, db, uid, password, "sale_type", candidate_pids, hierarchy_ids
-        )
+    # 1. Resolver res.partner.sale_type recorriendo sucursal -> empresa padre y fallback en ir.property
+    default_order_type_id = _extract_m2o_id(main_p.get("sale_type")) if has_sale_type else None
+    if has_sale_type and not default_order_type_id:
+        for cand_pid in candidate_pids:
+            for cid_ctx in hierarchy_ids:
+                test_ctx = {"allowed_company_ids": full_allowed, "company_id": cid_ctx}
+                rec = models.execute_kw(
+                    db, uid, password,
+                    "res.partner", "read",
+                    [[cand_pid]],
+                    {"fields": ["sale_type"], "context": test_ctx},
+                )
+                if rec:
+                    val = _extract_m2o_id(rec[0].get("sale_type"))
+                    if val:
+                        default_order_type_id = val
+                        break
+            if default_order_type_id:
+                break
         if not default_order_type_id:
-            default_order_type_id = _extract_m2o_id(main_p.get("sale_type"))
+            default_order_type_id = _resolve_partner_property_id(
+                models, db, uid, password, "sale_type", candidate_pids, hierarchy_ids
+            )
 
     # 2. Resolver lista de precios predeterminada del cliente
     default_pricelist_id = _extract_m2o_id(main_p.get("property_product_pricelist"))
@@ -697,7 +706,6 @@ def get_quotation_details(order_id: int, company_id: int, allowed_company_ids: l
         partner_id, company_id, allowed_company_ids, extra_address_ids=[inv_id, ship_id]
     )
 
-    # Asegurar tarjetas exactas de partner_invoice_id y partner_shipping_id (aunque pertenezcan a otro cliente)
     addr_map = {a["id"]: a for a in customer_bundle.get("related_addresses", [])}
     invoice_card = addr_map.get(inv_id) or get_single_partner_card(inv_id, company_id, allowed_company_ids)
     shipping_card = addr_map.get(ship_id) or get_single_partner_card(ship_id, company_id, allowed_company_ids)
@@ -861,7 +869,6 @@ def save_quotation(
     elif "route_id" in so_fields and order_id:
         order_vals["route_id"] = False
 
-    # Evitar choque con restricción UNIQUE de PostgreSQL cuando el campo queda vacío (usar False/NULL en vez de "")
     po_val = purchase_order_number.strip()
     po_field = None
     if "purchase_order_number" in so_fields:
@@ -897,7 +904,6 @@ def save_quotation(
         )
         action_label = "creada"
 
-    # Reafirmar pricelist_id y direcciones para que el cálculo por defecto de partner_id en Odoo 16 no los sobrescriba
     post_write_vals = {
         "partner_invoice_id": int(partner_invoice_id or partner_id),
         "partner_shipping_id": int(partner_shipping_id or partner_id),
