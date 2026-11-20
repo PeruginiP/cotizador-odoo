@@ -378,9 +378,8 @@
                     <div class="row mb-2 align-items-center">
                         <div class="col-5 odoo-field-label">Tipo de Pedido</div>
                         <div class="col-7">
-                            <select id="order-type-select" class="form-select form-select-sm"
-                                onchange="onOrderTypeChange()">
-                                <option value=""></option>
+                            <select id="order-type-select" class="form-select form-select-sm">
+                                <option value="">Cargando...</option>
                             </select>
                         </div>
                     </div>
@@ -681,14 +680,12 @@
         let partnerCards = { main: null, invoice: null, shipping: null };
 
         let companyPricelists = [];
-        let companyOrderTypes = [];
         let baseCurrency = { id: 1, name: 'ARS', symbol: '$', rate: 1.0 };
         let discountProduct = null;
 
         let editingOrderId = null;
         let editingOrderName = '';
         let originalLineIds = [];
-
 
         let rows = [createEmptyProductRowObj()];
 
@@ -990,20 +987,6 @@
             }, 300);
         }
 
-        function onOrderTypeChange() {
-            const typeId = parseInt($('#order-type-select').val());
-            if (!typeId) {
-                $('#route-select').val('');
-                return;
-            }
-            const foundType = companyOrderTypes.find(t => t.id === typeId);
-            if (foundType && foundType.default_route_id && $(`#route-select option[value="${foundType.default_route_id}"]`).length) {
-                $('#route-select').val(String(foundType.default_route_id));
-            } else {
-                $('#route-select').val('');
-            }
-        }
-
         function loadMainCustomerAndDefaults(partnerId) {
             $('#dropdown-main').addClass('d-none').empty();
             $.get(`/api/customers/${partnerId}`, { company_id: getSelectedCompanyId() }, function (bundle) {
@@ -1012,19 +995,13 @@
                 renderPartnerCard('invoice', bundle.default_invoice_partner || bundle.customer);
                 renderPartnerCard('shipping', bundle.default_delivery_partner || bundle.customer);
 
-                if (bundle.default_order_type_id && $(`#order-type-select option[value="${bundle.default_order_type_id}"]`).length) {
-                    $('#order-type-select').val(String(bundle.default_order_type_id));
-                } else {
-                    $('#order-type-select').val('');
-                }
-                onOrderTypeChange();
-
                 if (bundle.default_pricelist_id && companyPricelists.some(p => p.id === parseInt(bundle.default_pricelist_id))) {
                     $('#pricelist-select').val(String(bundle.default_pricelist_id));
                     onPricelistChange(true);
                 }
             });
         }
+
         function selectPartnerForAddressSlot(slot, partnerId) {
             $(`#dropdown-${slot}`).addClass('d-none').empty();
             $.get(`/api/partners/${partnerId}/card`, { company_id: getSelectedCompanyId() }, function (cardData) {
@@ -1802,18 +1779,17 @@
         function loadQuotationOptions() {
             const companyId = getSelectedCompanyId();
             $('#pricelist-select').html('<option value="">Cargando...</option>');
-            $('#order-type-select').html('<option value=""></option>');
-            $('#route-select').html('<option value=""></option>');
+            $('#order-type-select').html('<option value="">Cargando...</option>');
+            $('#route-select').html('<option value="">Cargando...</option>');
 
             $.get('/api/quotation-options', { company_id: companyId }, function (res) {
                 companyPricelists = res.pricelists || [];
-                companyOrderTypes = res.order_types || [];
                 baseCurrency = res.base_currency || { id: 1, name: 'ARS', symbol: '$', rate: 1.0 };
                 discountProduct = res.discount_product || null;
 
                 const plSel = $('#pricelist-select').empty();
                 if (!companyPricelists.length) {
-                    plSel.append('<option value=""></option>');
+                    plSel.append('<option value="">-- Sin listas configuradas --</option>');
                 } else {
                     companyPricelists.forEach(pl => {
                         plSel.append(`<option value="${pl.id}">${escapeHtml(pl.name)} (${escapeHtml(pl.currency_name)})</option>`);
@@ -1822,20 +1798,20 @@
                 onPricelistChange(false);
 
                 const typeSel = $('#order-type-select').empty();
-                typeSel.append('<option value=""></option>');
-                companyOrderTypes.forEach(t => {
+                typeSel.append('<option value="">-- Por defecto --</option>');
+                (res.order_types || []).forEach(t => {
                     typeSel.append(`<option value="${t.id}">${escapeHtml(t.name)}</option>`);
                 });
 
                 const routeSel = $('#route-select').empty();
-                routeSel.append('<option value=""></option>');
+                routeSel.append('<option value="">-- Por defecto --</option>');
                 (res.routes || []).forEach(r => {
                     routeSel.append(`<option value="${r.id}">${escapeHtml(r.name)}</option>`);
                 });
             }).fail(function () {
                 $('#pricelist-select').html('<option value="">Error al cargar</option>');
-                $('#order-type-select').html('<option value=""></option>');
-                $('#route-select').html('<option value=""></option>');
+                $('#order-type-select').html('<option value="">Error al cargar</option>');
+                $('#route-select').html('<option value="">Error al cargar</option>');
             });
         }
 
