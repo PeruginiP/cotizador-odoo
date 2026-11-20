@@ -15,6 +15,7 @@ from app.database import (
     get_sync_status,
     get_all_warehouses,
     get_products_by_ids,
+    compute_prices_from_local_pricelist,
     log_quotation,
 )
 from app.odoo_sync import run_full_sync
@@ -23,11 +24,12 @@ from app.odoo_client import (
     get_all_companies,
     search_customers,
     get_customer_details,
+    get_single_partner_card,
     search_quotations,
     get_quotation_details,
     save_quotation,
     get_quotation_options,
-    compute_pricelist_prices,
+    compute_pricelist_prices_odoo_fallback,
 )
 
 load_dotenv()
@@ -196,25 +198,36 @@ class PricelistComputeIn(BaseModel):
 @app.post("/api/pricelist-prices")
 def api_pricelist_prices(payload: PricelistComputeIn, user: dict = Depends(get_current_user)):
     allowed = validate_user_company(user, payload.company_id)
+    items_list = [it.model_dump() for it in payload.items]
     try:
-        prices = compute_pricelist_prices(
+        # 1. Intentar cálculo local instantáneo desde SQLite (listas + reglas + tipos de cambio descargados)
+        local_prices = compute_prices_from_local_pricelist(
+            company_id=payload.company_id,
+            pricelist_id=payload.pricelist_id,
+            items=items_list,
+        )
+        if local_prices is not None:
+            return JSONResponse({"prices": local_prices, "source": "sqlite"})
+
+        # 2. Fallback directo a Odoo si aún no se ejecutó la sincronización de listas de precios
+        fallback_prices = compute_pricelist_prices_odoo_fallback(
             company_id=payload.company_id,
             allowed_company_ids=allowed,
             pricelist_id=payload.pricelist_id,
-            items=[it.model_dump() for it in payload.items],
+            items=items_list,
             partner_id=payload.partner_id,
         )
-        return JSONResponse({"prices": prices})
+        return JSONResponse({"prices": fallback_prices, "source": "odoo"})
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/customers")
-def api_customers(company_id: int, q: str = "", user: dict = Depends(get_current_user)):
+def api_customers(company_id: int, q: str = "", include_children: bool = False, user: dict = Depends(get_current_user)):
     allowed = validate_user_company(user, company_id)
     if len(q.strip()) < 2:
         return JSONResponse([])
     try:
-        partners = search_customers(q.strip(), company_id, allowed)
+        partners = search_customers(q.strip(), company_id, allowed, include_children=include_children)
         return JSONResponse(partners)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -225,6 +238,15 @@ def api_customer_details(partner_id: int, company_id: int, user: dict = Depends(
     try:
         details = get_customer_details(partner_id, company_id, allowed)
         return JSONResponse(details)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/partners/{partner_id}/card")
+def api_single_partner_card(partner_id: int, company_id: int, user: dict = Depends(get_current_user)):
+    allowed = validate_user_company(user, company_id)
+    try:
+        card = get_single_partner_card(partner_id, company_id, allowed)
+        return JSONResponse(card)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

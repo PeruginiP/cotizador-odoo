@@ -25,9 +25,9 @@
 
         .customer-results {
             position: absolute;
-            z-index: 1055;
+            z-index: 1060;
             width: 100%;
-            max-height: 280px;
+            max-height: 290px;
             overflow-y: auto;
         }
 
@@ -47,18 +47,19 @@
             padding-right: 10px;
         }
 
-        .odoo-customer-card {
+        .odoo-partner-card {
             background-color: #f8f9fa;
             border-left: 4px solid #714B67;
             border-radius: 4px;
-            padding: 10px 14px;
+            padding: 8px 12px;
         }
 
-        .odoo-address-preview {
-            font-size: 0.81rem;
-            color: #5c636a;
-            margin-top: 3px;
-            padding-left: 2px;
+        .odoo-partner-card.card-invoice {
+            border-left-color: #0d6efd;
+        }
+
+        .odoo-partner-card.card-shipping {
+            border-left-color: #198754;
         }
 
         /* Grilla de líneas estilo Odoo */
@@ -72,12 +73,9 @@
             transition: all 0.15s;
         }
 
-        .product-cell:hover,
-        .product-cell:focus {
+        .product-cell:hover {
             background-color: #e7f1ff;
             border-color: #0d6efd !important;
-            box-shadow: 0 0 0 2px rgba(13, 110, 253, 0.25);
-            outline: none;
         }
 
         .row-section {
@@ -152,7 +150,6 @@
             color: #015c61;
         }
 
-        /* Botón estilo Odoo (Púrpura) */
         .btn-odoo-primary {
             background-color: #714B67;
             border-color: #714B67;
@@ -222,9 +219,9 @@
             </div>
 
             <div class="row g-4">
-                <!-- COLUMNA IZQUIERDA ODOO: CLIENTE + DIRECCIÓN FACTURA + DIRECCIÓN ENTREGA -->
+                <!-- COLUMNA IZQUIERDA ODOO: CLIENTE + DIRECCIÓN FACTURA + DIRECCIÓN ENTREGA (CON MISMO FORMATO Y BÚSQUEDA) -->
                 <div class="col-12 col-lg-7">
-                    <!-- CLIENTE -->
+                    <!-- 1. CLIENTE PRINCIPAL -->
                     <div class="row mb-3 align-items-start">
                         <div class="col-12 col-sm-4 odoo-field-label pt-1">
                             Cliente *
@@ -232,68 +229,60 @@
                             </div>
                         </div>
                         <div class="col-12 col-sm-8 position-relative">
-                            <div id="customer-search-box">
-                                <input type="text" id="customer-search" class="form-control form-control-sm"
-                                    placeholder="Escribir nombre, CUIT o código interno (mín. 2 letras)..."
-                                    autocomplete="off">
-                                <div id="customer-dropdown" class="list-group customer-results shadow d-none"></div>
+                            <div id="box-search-main">
+                                <input type="text" id="input-search-main" class="form-control form-control-sm"
+                                    placeholder="Buscar cliente por nombre, CUIT o código interno..." autocomplete="off"
+                                    oninput="onPartnerSearchInput('main')">
+                                <div id="dropdown-main" class="list-group customer-results shadow d-none"></div>
                             </div>
-
-                            <div id="customer-selected-card" class="odoo-customer-card d-none">
-                                <div class="d-flex justify-content-between align-items-start gap-2">
-                                    <div>
-                                        <div id="cust-card-name" class="fs-5 fw-bold text-dark lh-sm"></div>
-                                        <div class="mt-1 d-flex flex-wrap gap-2">
-                                            <span id="cust-card-code"
-                                                class="badge bg-secondary-subtle text-dark border d-none"></span>
-                                            <span id="cust-card-vat"
-                                                class="badge bg-light text-dark border d-none"></span>
-                                            <span id="cust-card-phone" class="small text-muted d-none"></span>
-                                        </div>
-                                        <div id="cust-card-address" class="small text-secondary mt-2"></div>
-                                    </div>
-                                    <button type="button" class="btn btn-outline-secondary btn-sm text-nowrap"
-                                        onclick="enableCustomerChange()">
-                                        Cambiar
-                                    </button>
-                                </div>
-                            </div>
-                            <input type="hidden" id="selected-partner-id">
+                            <div id="card-main" class="odoo-partner-card d-none"></div>
+                            <input type="hidden" id="id-main">
                         </div>
                     </div>
 
-                    <!-- DIRECCIÓN DE FACTURA -->
+                    <!-- 2. DIRECCIÓN DE FACTURA (EDITABLE - CUALQUIER CLIENTE/CONTACTO) -->
                     <div class="row mb-3 align-items-start">
                         <div class="col-12 col-sm-4 odoo-field-label pt-1">
                             Dirección de factura
+                            <div class="text-muted fw-normal" style="font-size: 0.74rem;">Por defecto del cliente o
+                                cualquier otro</div>
                         </div>
-                        <div class="col-12 col-sm-8">
-                            <select id="invoice-address-select" class="form-select form-select-sm"
-                                onchange="updateAddressPreview('invoice')" disabled>
-                                <option value="">Seleccioná primero un cliente...</option>
-                            </select>
-                            <div id="invoice-address-preview" class="odoo-address-preview"></div>
+                        <div class="col-12 col-sm-8 position-relative">
+                            <div id="box-search-invoice">
+                                <input type="text" id="input-search-invoice" class="form-control form-control-sm"
+                                    placeholder="Buscar cliente/dirección de facturación..." autocomplete="off"
+                                    onfocus="showRelatedAddressesInDropdown('invoice')"
+                                    oninput="onPartnerSearchInput('invoice')">
+                                <div id="dropdown-invoice" class="list-group customer-results shadow d-none"></div>
+                            </div>
+                            <div id="card-invoice" class="odoo-partner-card card-invoice d-none"></div>
+                            <input type="hidden" id="id-invoice">
                         </div>
                     </div>
 
-                    <!-- DIRECCIÓN DE ENTREGA -->
+                    <!-- 3. DIRECCIÓN DE ENTREGA (EDITABLE - CUALQUIER CLIENTE/CONTACTO) -->
                     <div class="row mb-1 align-items-start">
                         <div class="col-12 col-sm-4 odoo-field-label pt-1">
                             Dirección de entrega
+                            <div class="text-muted fw-normal" style="font-size: 0.74rem;">Por defecto del cliente o
+                                cualquier otro</div>
                         </div>
-                        <div class="col-12 col-sm-8">
-                            <select id="shipping-address-select" class="form-select form-select-sm"
-                                onchange="updateAddressPreview('shipping')" disabled>
-                                <option value="">Seleccioná primero un cliente...</option>
-                            </select>
-                            <div id="shipping-address-preview" class="odoo-address-preview"></div>
+                        <div class="col-12 col-sm-8 position-relative">
+                            <div id="box-search-shipping">
+                                <input type="text" id="input-search-shipping" class="form-control form-control-sm"
+                                    placeholder="Buscar cliente/dirección de entrega..." autocomplete="off"
+                                    onfocus="showRelatedAddressesInDropdown('shipping')"
+                                    oninput="onPartnerSearchInput('shipping')">
+                                <div id="dropdown-shipping" class="list-group customer-results shadow d-none"></div>
+                            </div>
+                            <div id="card-shipping" class="odoo-partner-card card-shipping d-none"></div>
+                            <input type="hidden" id="id-shipping">
                         </div>
                     </div>
                 </div>
 
                 <!-- COLUMNA DERECHA ODOO: LISTA PRECIOS + MONEDA, TIPO PEDIDO, RUTA, OC, REFERENCIA -->
                 <div class="col-12 col-lg-5">
-                    <!-- LISTA DE PRECIOS Y MONEDA -->
                     <div class="row mb-2 align-items-start">
                         <div class="col-5 odoo-field-label pt-1">
                             Lista de precios
@@ -330,7 +319,7 @@
                         <div class="col-5 odoo-field-label">Orden de Compra</div>
                         <div class="col-7">
                             <input type="text" id="purchase-order-number" class="form-control form-control-sm"
-                                placeholder="Nro OC cliente">
+                                placeholder="Nro OC cliente (opcional)">
                         </div>
                     </div>
 
@@ -349,10 +338,9 @@
         <div class="odoo-sheet p-2">
             <div class="d-flex justify-content-between align-items-center px-2 py-1 border-bottom mb-2">
                 <span class="fw-bold text-uppercase small text-secondary">Líneas del Pedido</span>
-                <span id="price-recalc-badge" class="badge bg-warning text-dark d-none">Recalculando precios de
+                <span id="price-recalc-badge" class="badge bg-warning text-dark d-none">Calculando precios de
                     lista...</span>
-                <span class="small text-muted">Tabulador salta entre celdas • Arrastrá desde <strong>⠿</strong> para
-                    reordenar</span>
+                <span class="small text-muted"><strong>Tab</strong> salta solo entre Cantidad → Precio → Dto %</span>
             </div>
 
             <div class="table-responsive">
@@ -493,7 +481,6 @@
                 </div>
                 <div class="modal-body">
                     <div class="row g-3 align-items-start">
-                        <!-- Columna izquierda: Inputs de porcentaje triple o importe fijo -->
                         <div class="col-6">
                             <div id="disc-pct-inputs">
                                 <div class="row mb-2 align-items-center">
@@ -540,7 +527,6 @@
                             </div>
                         </div>
 
-                        <!-- Columna derecha: Radio buttons de aplicación -->
                         <div class="col-6 border-start ps-3">
                             <div class="form-check mb-2">
                                 <input class="form-check-input" type="radio" name="discountMode" id="mode-sol"
@@ -589,11 +575,13 @@
         let loadQuoteModal;
         let discountModal;
         let activeRowIndex = 0;
-        let customerTimer = null;
+        let partnerTimers = { main: null, invoice: null, shipping: null };
         let quoteSearchTimer = null;
         let selectedProductsMap = new Map();
 
-        let customerAddresses = [];
+        let relatedCustomerAddresses = [];
+        let partnerCards = { main: null, invoice: null, shipping: null };
+
         let companyPricelists = [];
         let baseCurrency = { id: 1, name: 'ARS', symbol: '$', rate: 1.0 };
         let discountProduct = null;
@@ -656,6 +644,13 @@
                 $('#disc-1').focus().select();
             });
 
+            // Cerrar dropdowns de clientes al hacer clic fuera
+            $(document).on('click', function (e) {
+                if (!$(e.target).closest('#box-search-main').length) $('#dropdown-main').addClass('d-none');
+                if (!$(e.target).closest('#box-search-invoice').length) $('#dropdown-invoice').addClass('d-none');
+                if (!$(e.target).closest('#box-search-shipping').length) $('#dropdown-shipping').addClass('d-none');
+            });
+
             Sortable.create(document.getElementById('quote-grid-body'), {
                 handle: '.drag-handle',
                 animation: 150,
@@ -683,7 +678,7 @@
         function onCompanyChange() {
             updateCompanyHeaderBadge();
             clearModalSelection();
-            resetCustomerState();
+            resetAllPartnersState();
             exitEditModeUI();
             loadQuotationOptions();
             initModalDataTable();
@@ -706,7 +701,7 @@
             if (recalculateExistingRows) {
                 recalculateGridPricesFromPricelist();
             } else {
-                recalculateAllTotalsInPlace();
+                renderGrid();
             }
         }
 
@@ -721,19 +716,18 @@
             rows.forEach((r, idx) => {
                 if (specificIndices !== null && !specificIndices.includes(idx)) return;
                 if (r.row_type === 'product' && r.product_id !== null) {
-                    // Evitar pisar una línea de descuento global/importe fijo
                     if (discountProduct && r.product_id === discountProduct.id) return;
                     targetItems.push({ idx, product_id: r.product_id, qty: r.qty || 1 });
                 }
             });
 
             if (!targetItems.length) {
-                recalculateAllTotalsInPlace();
+                renderGrid();
                 return;
             }
 
             $('#price-recalc-badge').removeClass('d-none');
-            const partnerId = $('#selected-partner-id').val();
+            const partnerId = $('#id-main').val();
 
             $.ajax({
                 url: '/api/pricelist-prices',
@@ -751,13 +745,9 @@
                         const newPrice = priceMap[String(item.product_id)];
                         if (newPrice !== undefined) {
                             rows[item.idx].price_unit = parseFloat(newPrice);
-                            const inputEl = $(`#price-input-${item.idx}`);
-                            if (inputEl.length) {
-                                inputEl.val(rows[item.idx].price_unit);
-                            }
                         }
                     });
-                    recalculateAllTotalsInPlace();
+                    renderGrid();
                 },
                 complete: function () {
                     $('#price-recalc-badge').addClass('d-none');
@@ -765,37 +755,115 @@
             });
         }
 
-        // --- GESTIÓN DE CLIENTE Y DIRECCIONES (ESTILO ODOO) ---
-        function resetCustomerState() {
-            $('#selected-partner-id').val('');
-            $('#customer-search').val('');
-            $('#customer-dropdown').addClass('d-none').empty();
-            $('#customer-selected-card').addClass('d-none');
-            $('#customer-search-box').removeClass('d-none');
-            customerAddresses = [];
-
-            $('#invoice-address-select').html('<option value="">Seleccioná primero un cliente...</option>').prop('disabled', true);
-            $('#shipping-address-select').html('<option value="">Seleccioná primero un cliente...</option>').prop('disabled', true);
-            $('#invoice-address-preview').text('');
-            $('#shipping-address-preview').text('');
+        // --- GESTIÓN UNIFICADA DE CLIENTE, DIRECCIÓN FACTURA Y DIRECCIÓN ENTREGA ---
+        function resetAllPartnersState() {
+            relatedCustomerAddresses = [];
+            ['main', 'invoice', 'shipping'].forEach(slot => {
+                partnerCards[slot] = null;
+                $(`#id-${slot}`).val('');
+                $(`#input-search-${slot}`).val('');
+                $(`#dropdown-${slot}`).addClass('d-none').empty();
+                $(`#card-${slot}`).addClass('d-none').empty();
+                $(`#box-search-${slot}`).removeClass('d-none');
+            });
         }
 
-        function enableCustomerChange() {
-            $('#customer-selected-card').addClass('d-none');
-            $('#customer-search-box').removeClass('d-none');
-            $('#customer-search').val('').focus();
+        function enablePartnerSlotChange(slot) {
+            $(`#card-${slot}`).addClass('d-none');
+            $(`#box-search-${slot}`).removeClass('d-none');
+            const inp = $(`#input-search-${slot}`).val('').focus();
+            if (slot !== 'main') {
+                showRelatedAddressesInDropdown(slot);
+            }
         }
 
-        $('#customer-search').on('input', function () {
-            clearTimeout(customerTimer);
-            const q = $(this).val().trim();
+        function renderPartnerCard(slot, cardData) {
+            partnerCards[slot] = cardData;
+            $(`#id-${slot}`).val(cardData.id);
+
+            const codeBadge = cardData.internal_code
+                ? `<span class="badge bg-secondary-subtle text-dark border">Cód: ${escapeHtml(cardData.internal_code)}</span>`
+                : '';
+            const vatBadge = cardData.vat
+                ? `<span class="badge bg-light text-dark border">CUIT: ${escapeHtml(cardData.vat)}</span>`
+                : '';
+            const typeBadge = (slot !== 'main' && cardData.type_label)
+                ? `<span class="badge bg-info-subtle text-dark border">${escapeHtml(cardData.type_label)}</span>`
+                : '';
+            const phoneSpan = cardData.phone
+                ? `<span class="small text-muted">Tel: ${escapeHtml(cardData.phone)}</span>`
+                : '';
+            const parentSubtitle = (cardData.parent_name && cardData.parent_name !== cardData.name)
+                ? `<div class="small text-muted fw-semibold">${escapeHtml(cardData.parent_name)}</div>`
+                : '';
+
+            const addrHtml = (cardData.address_lines && cardData.address_lines.length)
+                ? cardData.address_lines.map(l => escapeHtml(l)).join('<br>')
+                : '<span class="fst-italic">Sin dirección cargada</span>';
+
+            const nameSizeClass = slot === 'main' ? 'fs-5' : 'fs-6';
+
+            const html = `
+                <div class="d-flex justify-content-between align-items-start gap-2">
+                    <div>
+                        ${parentSubtitle}
+                        <div class="${nameSizeClass} fw-bold text-dark lh-sm">${escapeHtml(cardData.name)}</div>
+                        <div class="mt-1 d-flex flex-wrap gap-1 align-items-center">
+                            ${codeBadge}
+                            ${vatBadge}
+                            ${typeBadge}
+                            ${phoneSpan}
+                        </div>
+                        <div class="small text-secondary mt-1">${addrHtml}</div>
+                    </div>
+                    <button type="button" class="btn btn-outline-secondary btn-sm text-nowrap" onclick="enablePartnerSlotChange('${slot}')">
+                        Cambiar
+                    </button>
+                </div>
+            `;
+
+            $(`#card-${slot}`).html(html).removeClass('d-none');
+            $(`#box-search-${slot}`).addClass('d-none');
+            $(`#dropdown-${slot}`).addClass('d-none').empty();
+        }
+
+        function showRelatedAddressesInDropdown(slot) {
+            if (!relatedCustomerAddresses.length) return;
+            const q = $(`#input-search-${slot}`).val().trim();
+            if (q.length >= 2) return;
+
+            const dd = $(`#dropdown-${slot}`).empty();
+            dd.append('<div class="list-group-item py-1 px-2 bg-light small fw-bold text-secondary">Direcciones del cliente actual (o escribí para buscar otro):</div>');
+            relatedCustomerAddresses.forEach(addr => {
+                const codeTag = addr.internal_code ? `<span class="badge bg-secondary me-1">${escapeHtml(addr.internal_code)}</span>` : '';
+                const typeTag = `<span class="badge bg-info-subtle text-dark border ms-1">${escapeHtml(addr.type_label)}</span>`;
+                const item = $(`<button type="button" class="list-group-item list-group-item-action py-1 px-2 text-start"></button>`)
+                    .html(`<div>${codeTag}<strong>${escapeHtml(addr.name)}</strong>${typeTag}</div><div class="text-muted" style="font-size:0.76rem;">${escapeHtml(addr.address_text)}</div>`)
+                    .on('click', () => renderPartnerCard(slot, addr));
+                dd.append(item);
+            });
+            dd.removeClass('d-none');
+        }
+
+        function onPartnerSearchInput(slot) {
+            clearTimeout(partnerTimers[slot]);
+            const q = $(`#input-search-${slot}`).val().trim();
             if (q.length < 2) {
-                $('#customer-dropdown').addClass('d-none').empty();
+                if (slot !== 'main' && relatedCustomerAddresses.length) {
+                    showRelatedAddressesInDropdown(slot);
+                } else {
+                    $(`#dropdown-${slot}`).addClass('d-none').empty();
+                }
                 return;
             }
-            customerTimer = setTimeout(() => {
-                $.get('/api/customers', { q, company_id: getSelectedCompanyId() }, function (list) {
-                    const dd = $('#customer-dropdown').empty();
+
+            partnerTimers[slot] = setTimeout(() => {
+                $.get('/api/customers', {
+                    q,
+                    company_id: getSelectedCompanyId(),
+                    include_children: slot !== 'main'
+                }, function (list) {
+                    const dd = $(`#dropdown-${slot}`).empty();
                     if (!list.length) {
                         dd.append('<div class="list-group-item small text-muted">Sin resultados</div>').removeClass('d-none');
                         return;
@@ -803,87 +871,45 @@
                     list.forEach(c => {
                         const codeTag = c.internal_code ? `<span class="badge bg-secondary me-1">${escapeHtml(c.internal_code)}</span>` : '';
                         const vatTag = c.vat ? `<span class="text-muted ms-1">(${escapeHtml(c.vat)})</span>` : '';
-                        const cityTag = c.city ? `<div class="text-muted" style="font-size:0.76rem;">${escapeHtml(c.street || '')} ${escapeHtml(c.city)}</div>` : '';
+                        const parentTag = c.parent_name ? `<span class="text-primary small"> [${escapeHtml(c.parent_name)}]</span>` : '';
+                        const cityTag = (c.street || c.city) ? `<div class="text-muted" style="font-size:0.76rem;">${escapeHtml(c.street || '')} ${escapeHtml(c.city || '')}</div>` : '';
 
                         const item = $(`<button type="button" class="list-group-item list-group-item-action py-1 px-2 text-start"></button>`)
-                            .html(`<div>${codeTag}<strong>${escapeHtml(c.name)}</strong>${vatTag}</div>${cityTag}`)
-                            .on('click', () => loadCustomerAndAddresses(c.id));
+                            .html(`<div>${codeTag}<strong>${escapeHtml(c.name)}</strong>${parentTag}${vatTag}</div>${cityTag}`)
+                            .on('click', () => {
+                                if (slot === 'main') {
+                                    loadMainCustomerAndDefaults(c.id);
+                                } else {
+                                    selectPartnerForAddressSlot(slot, c.id);
+                                }
+                            });
                         dd.append(item);
                     });
                     dd.removeClass('d-none');
                 });
             }, 300);
-        });
+        }
 
-        function loadCustomerAndAddresses(partnerId, preselectedInvoiceId = null, preselectedShippingId = null, preselectedPricelistId = null) {
-            $('#customer-dropdown').addClass('d-none').empty();
+        function loadMainCustomerAndDefaults(partnerId) {
+            $('#dropdown-main').addClass('d-none').empty();
             $.get(`/api/customers/${partnerId}`, { company_id: getSelectedCompanyId() }, function (bundle) {
-                applyCustomerBundle(bundle, preselectedInvoiceId, preselectedShippingId, preselectedPricelistId);
+                relatedCustomerAddresses = bundle.related_addresses || [];
+                renderPartnerCard('main', bundle.customer);
+                renderPartnerCard('invoice', bundle.default_invoice_partner || bundle.customer);
+                renderPartnerCard('shipping', bundle.default_delivery_partner || bundle.customer);
+
+                if (bundle.default_pricelist_id && companyPricelists.some(p => p.id === parseInt(bundle.default_pricelist_id))) {
+                    $('#pricelist-select').val(String(bundle.default_pricelist_id));
+                    onPricelistChange(true);
+                }
             });
         }
 
-        function applyCustomerBundle(bundle, preselectedInvoiceId = null, preselectedShippingId = null, preselectedPricelistId = null) {
-            const cust = bundle.customer;
-            customerAddresses = bundle.addresses || [cust];
-
-            $('#selected-partner-id').val(cust.id);
-            $('#cust-card-name').text(cust.name);
-
-            if (cust.internal_code) {
-                $('#cust-card-code').text('Cód: ' + cust.internal_code).removeClass('d-none');
-            } else {
-                $('#cust-card-code').addClass('d-none');
-            }
-
-            if (cust.vat) {
-                $('#cust-card-vat').text('CUIT: ' + cust.vat).removeClass('d-none');
-            } else {
-                $('#cust-card-vat').addClass('d-none');
-            }
-
-            if (cust.phone) {
-                $('#cust-card-phone').text('Tel: ' + cust.phone).removeClass('d-none');
-            } else {
-                $('#cust-card-phone').addClass('d-none');
-            }
-
-            $('#cust-card-address').html(
-                (cust.address_lines && cust.address_lines.length)
-                    ? cust.address_lines.map(l => escapeHtml(l)).join('<br>')
-                    : '<span class="fst-italic">Sin dirección cargada</span>'
-            );
-
-            $('#customer-search-box').addClass('d-none');
-            $('#customer-selected-card').removeClass('d-none');
-
-            const invSel = $('#invoice-address-select').empty().prop('disabled', false);
-            const shipSel = $('#shipping-address-select').empty().prop('disabled', false);
-
-            customerAddresses.forEach(addr => {
-                const label = `${addr.name} [${addr.type_label}] — ${addr.address_text}`;
-                invSel.append(`<option value="${addr.id}">${escapeHtml(label)}</option>`);
-                shipSel.append(`<option value="${addr.id}">${escapeHtml(label)}</option>`);
+        function selectPartnerForAddressSlot(slot, partnerId) {
+            $(`#dropdown-${slot}`).addClass('d-none').empty();
+            $.get(`/api/partners/${partnerId}/card`, { company_id: getSelectedCompanyId() }, function (cardData) {
+                renderPartnerCard(slot, cardData);
             });
-
-            invSel.val(preselectedInvoiceId || bundle.default_invoice_id || cust.id);
-            shipSel.val(preselectedShippingId || bundle.default_delivery_id || cust.id);
-
-            updateAddressPreview('invoice');
-            updateAddressPreview('shipping');
-
-            // Aplicar lista de precios predeterminada del cliente (si existe en la empresa)
-            const targetPl = preselectedPricelistId || bundle.default_pricelist_id;
-            if (targetPl && companyPricelists.some(p => p.id === parseInt(targetPl))) {
-                $('#pricelist-select').val(String(targetPl));
-                onPricelistChange(preselectedPricelistId === null);
-            }
-        }
-
-        function updateAddressPreview(kind) {
-            const selId = parseInt(kind === 'invoice' ? $('#invoice-address-select').val() : $('#shipping-address-select').val());
-            const previewEl = kind === 'invoice' ? $('#invoice-address-preview') : $('#shipping-address-preview');
-            const found = customerAddresses.find(a => a.id === selId);
-            previewEl.text(found ? found.address_text : '');
         }
 
         // --- DATATABLES BUSCADOR DE PRODUCTOS ---
@@ -1089,7 +1115,6 @@
             searchModal.hide();
             renderGrid();
 
-            // Calcular precio exacto de lista de precios seleccionada para los ítems recién insertados
             recalculateGridPricesFromPricelist(insertedIndices);
 
             setTimeout(() => {
@@ -1097,7 +1122,25 @@
             }, 150);
         }
 
-        // --- FILAS DE PRODUCTO, SECCIÓN, NOTA Y ACTUALIZACIÓN SIN PERDER FOCO (TAB) ---
+        // --- TABULACIÓN EXCLUSIVA ENTRE CANTIDAD -> PRECIO -> DESCUENTO ---
+        function handleGridTabKey(e) {
+            if (e.key !== 'Tab') return;
+            const navInputs = Array.from(document.querySelectorAll('#quote-grid-body .grid-nav-input:not(:disabled)'));
+            if (!navInputs.length) return;
+
+            const currentIdx = navInputs.indexOf(e.target);
+            if (currentIdx === -1) return;
+
+            e.preventDefault();
+            const nextIdx = e.shiftKey
+                ? (currentIdx - 1 + navInputs.length) % navInputs.length
+                : (currentIdx + 1) % navInputs.length;
+
+            navInputs[nextIdx].focus();
+            navInputs[nextIdx].select();
+        }
+
+        // --- FILAS DE PRODUCTO, SECCIÓN, NOTA Y ACTUALIZACIÓN EN EL LUGAR ---
         function addEmptyProductRow(focusProduct = false) {
             rows.push(createEmptyProductRowObj());
             renderGrid();
@@ -1140,7 +1183,6 @@
             renderGrid();
         }
 
-        // Actualiza modelo y subtotales EN EL LUGAR sin destruir el DOM (mantiene el foco al presionar Tab)
         function updateGridFieldInPlace(idx, field, val) {
             if (field === 'name') {
                 rows[idx].name = val;
@@ -1206,7 +1248,6 @@
             let totalNet = 0;
 
             rows.forEach((r, idx) => {
-                // tabindex="-1" en botones auxiliares para que TAB salte directo entre celdas editables
                 const orderCell = `
                     <td class="text-center text-nowrap">
                         <span class="drag-handle me-1" title="Arrastrar para reordenar">⠿</span>
@@ -1228,7 +1269,7 @@
                             <td colspan="${totalColsCount - 2}">
                                 <div class="d-flex align-items-center gap-2">
                                     <span class="badge bg-dark">SECCIÓN</span>
-                                    <input id="text-input-${idx}" type="text" class="form-control form-control-sm"
+                                    <input id="text-input-${idx}" tabindex="-1" type="text" class="form-control form-control-sm"
                                            value="${escapeHtml(r.name)}"
                                            placeholder="Nombre de la sección..."
                                            oninput="updateGridFieldInPlace(${idx}, 'name', this.value)">
@@ -1247,7 +1288,7 @@
                             <td colspan="${totalColsCount - 2}">
                                 <div class="d-flex align-items-center gap-2">
                                     <span class="badge bg-secondary">NOTA</span>
-                                    <input id="text-input-${idx}" type="text" class="form-control form-control-sm"
+                                    <input id="text-input-${idx}" tabindex="-1" type="text" class="form-control form-control-sm"
                                            value="${escapeHtml(r.name)}"
                                            placeholder="Texto de la nota..."
                                            oninput="updateGridFieldInPlace(${idx}, 'name', this.value)">
@@ -1265,7 +1306,7 @@
 
                 const prodDisplay = hasProd
                     ? `<div class="fw-bold text-primary">${escapeHtml(r.default_code)}</div>`
-                    : `<span class="text-muted small">Clic o Enter...</span>`;
+                    : `<span class="text-muted small">Clic para buscar...</span>`;
 
                 let stockCellsHtml = '';
                 let rowTotalStock = 0;
@@ -1288,14 +1329,12 @@
                     <tr>
                         ${orderCell}
                         <td>
-                            <div class="product-cell" tabindex="0"
-                                 onclick="openProductModal(${idx})"
-                                 onkeydown="if(event.key==='Enter'){event.preventDefault();openProductModal(${idx});}">
+                            <div class="product-cell" tabindex="-1" onclick="openProductModal(${idx})">
                                 ${prodDisplay}
                             </div>
                         </td>
                         <td>
-                            <input type="text" class="form-control form-control-sm"
+                            <input type="text" tabindex="-1" class="form-control form-control-sm"
                                    value="${escapeHtml(r.name)}"
                                    placeholder="Detalle del producto..."
                                    ${hasProd ? '' : 'disabled'}
@@ -1304,20 +1343,26 @@
                         <td class="small fw-semibold text-secondary">${hasProd ? escapeHtml(r.brand) : '-'}</td>
                         <td>
                             <input id="qty-input-${idx}" type="number" step="1" min="0.01"
-                                   class="form-control form-control-sm text-end"
+                                   class="form-control form-control-sm text-end grid-nav-input"
                                    value="${r.qty}" ${hasProd ? '' : 'disabled'}
+                                   onfocus="this.select()"
+                                   onkeydown="handleGridTabKey(event)"
                                    oninput="updateGridFieldInPlace(${idx}, 'qty', this.value)">
                         </td>
                         <td>
                             <input id="price-input-${idx}" type="number" step="0.01"
-                                   class="form-control form-control-sm text-end"
+                                   class="form-control form-control-sm text-end grid-nav-input"
                                    value="${r.price_unit}" ${hasProd ? '' : 'disabled'}
+                                   onfocus="this.select()"
+                                   onkeydown="handleGridTabKey(event)"
                                    oninput="updateGridFieldInPlace(${idx}, 'price_unit', this.value)">
                         </td>
                         <td>
                             <input id="disc-input-${idx}" type="number" step="0.1" min="0" max="100"
-                                   class="form-control form-control-sm text-end"
+                                   class="form-control form-control-sm text-end grid-nav-input"
                                    value="${r.discount}" ${hasProd ? '' : 'disabled'}
+                                   onfocus="this.select()"
+                                   onkeydown="handleGridTabKey(event)"
                                    oninput="updateGridFieldInPlace(${idx}, 'discount', this.value)">
                         </td>
                         <td id="row-subtotal-${idx}" class="text-end fw-bold text-nowrap">
@@ -1415,7 +1460,6 @@
                     discountModal.hide();
                     return;
                 }
-                // Calcular subtotal actual de los productos (excluyendo líneas de descuento previas)
                 let currentSubtotal = 0;
                 rows.forEach(r => {
                     if (r.row_type === 'product' && r.product_id !== null && r.product_id !== discountProduct.id) {
@@ -1433,7 +1477,6 @@
                 lineLabel = 'Descuento';
             }
 
-            // Insertar línea de descuento antes de la última fila vacía
             const insertAt = (rows.length > 0 && rows[rows.length - 1].row_type === 'product' && rows[rows.length - 1].product_id === null)
                 ? rows.length - 1
                 : rows.length;
@@ -1517,7 +1560,15 @@
                 $('#btn-send-odoo').text(`Guardar Cambios en ${data.order_name}`);
                 $('#quote-alert').addClass('d-none');
 
-                applyCustomerBundle(data.customer_bundle, data.partner_invoice_id, data.partner_shipping_id, data.pricelist_id);
+                relatedCustomerAddresses = (data.customer_bundle && data.customer_bundle.related_addresses) || [];
+                renderPartnerCard('main', data.customer_bundle.customer);
+                renderPartnerCard('invoice', data.invoice_card || data.customer_bundle.customer);
+                renderPartnerCard('shipping', data.shipping_card || data.customer_bundle.customer);
+
+                if (data.pricelist_id && companyPricelists.some(p => p.id === parseInt(data.pricelist_id))) {
+                    $('#pricelist-select').val(String(data.pricelist_id));
+                    onPricelistChange(false);
+                }
 
                 $('#order-type-select').val(data.type_id || '');
                 $('#route-select').val(data.route_id || '');
@@ -1565,7 +1616,7 @@
 
         function startNewQuotation() {
             exitEditModeUI();
-            resetCustomerState();
+            resetAllPartnersState();
             $('#order-type-select').val('');
             $('#route-select').val('');
             $('#purchase-order-number').val('');
@@ -1650,11 +1701,11 @@
         // --- ENVÍO / ACTUALIZACIÓN EN ODOO ---
         function submitQuotation() {
             const companyId = getSelectedCompanyId();
-            const partnerId = $('#selected-partner-id').val();
-            const invoiceId = $('#invoice-address-select').val();
-            const shippingId = $('#shipping-address-select').val();
+            const partnerId = $('#id-main').val();
+            const invoiceId = $('#id-invoice').val();
+            const shippingId = $('#id-shipping').val();
             const pricelistVal = $('#pricelist-select').val();
-            const customerName = $('#cust-card-name').text();
+            const customerName = partnerCards.main ? partnerCards.main.name : '';
             const typeVal = $('#order-type-select').val();
             const routeVal = $('#route-select').val();
             const poNumber = $('#purchase-order-number').val();

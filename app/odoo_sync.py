@@ -35,8 +35,8 @@ def run_full_sync():
         def execute_kw(model, method, args, kwargs=None):
             return get_models().execute_kw(db, uid, password, model, method, args, kwargs or {})
 
-        # 0. Obtener todas las compañías para operar en modo multi-empresa
-        companies = execute_kw("res.company", "search_read", [[]], {"fields": ["id", "name"]})
+        # 0. Compañías y tipos de cambio por compañía
+        companies = execute_kw("res.company", "search_read", [[]], {"fields": ["id", "name", "currency_id"]})
         all_company_ids = [c["id"] for c in companies]
         company_name_map = {c["id"]: c["name"] for c in companies}
         multi_ctx = {"allowed_company_ids": all_company_ids}
@@ -55,8 +55,100 @@ def run_full_sync():
                     resultados.extend(future.result())
             return resultados
 
-        # 1. Metadatos de producto y todos los almacenes de todas las compañías
-        update_sync_status("running", "Leyendo compañías, almacenes y metadatos...")
+        # 1. Monedas, listas de precios, categorías y almacenes
+        update_sync_status("running", "Descargando monedas, listas de precios y almacenes...")
+        currency_rows = []
+        for comp in companies:
+            comp_id = int(comp["id"])
+            base_curr_id = int(comp["currency_id"][0]) if isinstance(comp.get("currency_id"), list) else 1
+            comp_ctx = {"allowed_company_ids": all_company_ids, "company_id": comp_id}
+            currs = execute_kw(
+                "res.currency",
+                "search_read",
+                [[("active", "=", True)]],
+                {"fields": ["id", "name", "symbol", "rate"], "context": comp_ctx},
+            )
+            for c in currs:
+                cid = int(c["id"])
+                currency_rows.append((
+                    comp_id,
+                    cid,
+                    c["name"],
+                    c.get("symbol") or "$",
+                    float(c.get("rate") or 1.0),
+                    1 if cid == base_curr_id else 0,
+                ))
+
+        raw_pricelists = execute_kw(
+            "product.pricelist",
+            "search_read",
+            [[("active", "=", True)]],
+            {"fields": ["id", "name", "currency_id", "company_id", "sequence"], "context": multi_ctx},
+        )
+        pricelist_rows = []
+        for pl in raw_pricelists:
+            c_info = pl.get("currency_id")
+            comp_info = pl.get("company_id")
+            pricelist_rows.append((
+                int(pl["id"]),
+                pl["name"],
+                int(c_info[0]) if isinstance(c_info, list) else 0,
+                int(comp_info[0]) if isinstance(comp_info, list) else 0,
+                int(pl.get("sequence") or 10),
+            ))
+
+        pli_meta = execute_kw("product.pricelist.item", "fields_get", [[]], {"attributes": ["type"]})
+        wanted_pli_fields = [
+            "id", "pricelist_id", "applied_on", "categ_id", "product_tmpl_id", "product_id",
+            "min_quantity", "date_start", "date_end", "compute_price", "fixed_price",
+            "percent_price", "price_discount", "price_surcharge", "price_round",
+            "price_min_margin", "price_max_margin", "base", "base_pricelist_id", "currency_id",
+        ]
+        valid_pli_fields = [f for f in wanted_pli_fields if f in pli_meta]
+        raw_pli = execute_kw(
+            "product.pricelist.item",
+            "search_read",
+            [[]],
+            {"fields": valid_pli_fields, "context": multi_ctx},
+        )
+        pricelist_item_rows = []
+        for it in raw_pli:
+            pl_info = it.get("pricelist_id")
+            if not isinstance(pl_info, list):
+                continue
+            cat_info = it.get("categ_id")
+            tmpl_info = it.get("product_tmpl_id")
+            prod_info = it.get("product_id")
+            bpl_info = it.get("base_pricelist_id")
+            cur_info = it.get("currency_id")
+
+            pricelist_item_rows.append((
+                int(it["id"]),
+                int(pl_info[0]),
+                it.get("applied_on") or "3_global",
+                int(cat_info[0]) if isinstance(cat_info, list) else 0,
+                int(tmpl_info[0]) if isinstance(tmpl_info, list) else 0,
+                int(prod_info[0]) if isinstance(prod_info, list) else 0,
+                float(it.get("min_quantity") or 0.0),
+                str(it.get("date_start") or ""),
+                str(it.get("date_end") or ""),
+                it.get("compute_price") or "fixed",
+                float(it.get("fixed_price") or 0.0),
+                float(it.get("percent_price") or 0.0),
+                float(it.get("price_discount") or 0.0),
+                float(it.get("price_surcharge") or 0.0),
+                float(it.get("price_round") or 0.0),
+                float(it.get("price_min_margin") or 0.0),
+                float(it.get("price_max_margin") or 0.0),
+                it.get("base") or "list_price",
+                int(bpl_info[0]) if isinstance(bpl_info, list) else 0,
+                int(cur_info[0]) if isinstance(cur_info, list) else 0,
+            ))
+
+        raw_categs = execute_kw("product.category", "search_read", [[]], {"fields": ["id", "parent_path"], "context": multi_ctx})
+        category_rows = [(int(c["id"]), c.get("parent_path") or "") for c in raw_categs]
+
+        # Metadatos de producto
         studio_field = "x_studio_selection_field_6ua_1j8tii7sp"
         all_prod_fields = execute_kw(
             "product.product",
@@ -64,7 +156,6 @@ def run_full_sync():
             [[]],
             {"attributes": ["type", "relation", "selection"], "context": multi_ctx},
         )
-
         estado_selection_map = dict(all_prod_fields.get(studio_field, {}).get("selection", []))
 
         brand_field = None
@@ -137,6 +228,10 @@ def run_full_sync():
             "default_code",
             "name",
             "list_price",
+            "standard_price",
+            "product_tmpl_id",
+            "categ_id",
+            "currency_id",
             "taxes_id",
             "barcode_ids",
             studio_field,
@@ -162,8 +257,8 @@ def run_full_sync():
             bc_records = leer_en_paralelo(barcode_rel_model, all_barcode_ids, [barcode_code_field], batch_size=5000)
             barcodes_map = {b["id"]: str(b[barcode_code_field]) for b in bc_records if b.get(barcode_code_field)}
 
-        # 5. Guardar en SQLite
-        update_sync_status("running", "Guardando índice en base de datos local...")
+        # 5. Guardar todo en SQLite
+        update_sync_status("running", "Guardando índice y listas de precios en base local...")
         product_rows = []
         for p in productos_raw:
             pid = int(p["id"])
@@ -187,23 +282,39 @@ def run_full_sync():
             estado_raw = p.get(studio_field)
             estado = estado_selection_map.get(estado_raw, estado_raw) if estado_raw else ""
 
+            tmpl_info = p.get("product_tmpl_id")
+            cat_info = p.get("categ_id")
+            pcurr_info = p.get("currency_id")
+
             product_rows.append((
                 pid,
                 p.get("default_code") or "",
                 p.get("name") or "",
                 float(p.get("list_price") or 0.0),
+                float(p.get("standard_price") or 0.0),
+                int(tmpl_info[0]) if isinstance(tmpl_info, list) else 0,
+                int(cat_info[0]) if isinstance(cat_info, list) else 0,
+                int(pcurr_info[0]) if isinstance(pcurr_info, list) else 0,
                 taxes_json,
                 marca,
                 codigos_barra,
                 estado,
             ))
 
-        replace_all_catalog(product_rows, warehouse_rows, stock_rows)
+        replace_all_catalog(
+            product_rows=product_rows,
+            warehouse_rows=warehouse_rows,
+            stock_rows=stock_rows,
+            category_rows=category_rows,
+            currency_rows=currency_rows,
+            pricelist_rows=pricelist_rows,
+            pricelist_item_rows=pricelist_item_rows,
+        )
         elapsed = round(time.time() - t0, 1)
         now_str = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
         update_sync_status(
             "idle",
-            f"Sincronizado en {elapsed}s ({len(warehouse_rows)} almacenes)",
+            f"Sincronizado en {elapsed}s ({len(pricelist_rows)} listas, {len(warehouse_rows)} alm.)",
             last_sync=now_str,
             total_products=len(product_rows),
         )
