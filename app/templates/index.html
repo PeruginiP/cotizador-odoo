@@ -4,13 +4,32 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Cotizador Odoo</title>
+    <title>Cotizador Argelec - Odoo</title>
+    <link rel="icon" type="image/png" href="/static/isotipo-argelec.png">
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://cdn.datatables.net/1.13.8/css/dataTables.bootstrap5.min.css" rel="stylesheet">
     <style>
+        :root {
+            --brand-header: #2f3787;
+            --brand-btn: #5184af;
+            --brand-btn-hover: #416e95;
+            --brand-text: #000000;
+        }
+
         body {
             font-size: 0.88rem;
             background-color: #eef0f4;
+            color: var(--brand-text);
+        }
+
+        .table,
+        .table td,
+        .table th,
+        .form-control,
+        .form-select,
+        .odoo-sheet,
+        .modal-body {
+            color: #000000;
         }
 
         .table-sm td,
@@ -31,17 +50,66 @@
             overflow-y: auto;
         }
 
+        /* Encabezado principal Argelec (#2f3787) */
+        .navbar-argelec {
+            background-color: var(--brand-header) !important;
+            border-bottom: 3px solid var(--brand-btn);
+        }
+
+        .brand-logo-box {
+            background-color: #ffffff;
+            border-radius: 5px;
+            padding: 3px 10px;
+            display: inline-flex;
+            align-items: center;
+        }
+
+        .modal-header-argelec {
+            background-color: var(--brand-header) !important;
+            color: #ffffff !important;
+        }
+
+        /* Botones principales Argelec (#5184af) */
+        .btn-brand,
+        .btn-odoo-primary {
+            background-color: var(--brand-btn) !important;
+            border-color: var(--brand-btn) !important;
+            color: #ffffff !important;
+        }
+
+        .btn-brand:hover,
+        .btn-brand:focus,
+        .btn-odoo-primary:hover,
+        .btn-odoo-primary:focus {
+            background-color: var(--brand-btn-hover) !important;
+            border-color: var(--brand-btn-hover) !important;
+            color: #ffffff !important;
+        }
+
+        .btn-outline-brand {
+            color: var(--brand-header);
+            border-color: var(--brand-btn);
+            background-color: #ffffff;
+        }
+
+        .btn-outline-brand:hover {
+            background-color: var(--brand-btn);
+            border-color: var(--brand-btn);
+            color: #ffffff;
+        }
+
         /* Ficha estilo Odoo */
         .odoo-sheet {
             background: #ffffff;
             border: 1px solid #d8dadd;
+            border-top: 3px solid var(--brand-header);
             border-radius: 4px;
             box-shadow: 0 1px 4px rgba(0, 0, 0, 0.06);
         }
 
         .odoo-field-label {
-            font-weight: 600;
-            color: #495057;
+            font-weight: 700;
+            color: #000000;
             font-size: 0.84rem;
             border-right: 1px solid #e9ecef;
             padding-right: 10px;
@@ -49,13 +117,14 @@
 
         .odoo-partner-card {
             background-color: #f8f9fa;
-            border-left: 4px solid #714B67;
+            border-left: 4px solid var(--brand-header);
             border-radius: 4px;
             padding: 8px 12px;
+            color: #000000;
         }
 
         .odoo-partner-card.card-invoice {
-            border-left-color: #0d6efd;
+            border-left-color: var(--brand-btn);
         }
 
         .odoo-partner-card.card-shipping {
@@ -65,8 +134,8 @@
         /* Grilla de líneas estilo Odoo */
         .product-cell {
             cursor: pointer;
-            background-color: #fffdf5;
-            border: 1px dashed #adb5bd !important;
+            background-color: #f7faff;
+            border: 1px dashed var(--brand-btn) !important;
             border-radius: 4px;
             padding: 4px 8px;
             min-width: 145px;
@@ -74,57 +143,57 @@
         }
 
         .product-cell:hover {
-            background-color: #e7f1ff;
-            border-color: #0d6efd !important;
+            background-color: #e4eef7;
+            border-color: var(--brand-header) !important;
         }
 
         .row-section {
-            background-color: #f1f3f5 !important;
+            background-color: #e9edf5 !important;
         }
 
         .row-section input {
             font-weight: 700;
             font-size: 0.94rem;
-            color: #212529;
+            color: #000000;
             background: transparent;
             border-color: transparent;
         }
 
         .row-section input:focus {
             background: #fff;
-            border-color: #86b7fe;
+            border-color: var(--brand-btn);
         }
 
         .row-note {
-            background-color: #fffef7 !important;
+            background-color: #f9fafb !important;
         }
 
         .row-note input {
             font-style: italic;
-            color: #495057;
+            color: #000000;
             background: transparent;
             border-color: transparent;
         }
 
         .row-note input:focus {
             background: #fff;
-            border-color: #86b7fe;
+            border-color: var(--brand-btn);
         }
 
         .drag-handle {
             cursor: grab;
-            color: #adb5bd;
+            color: #6c757d;
             font-size: 1.05rem;
             user-select: none;
         }
 
         .drag-handle:hover {
-            color: #495057;
+            color: #000000;
         }
 
         .sortable-ghost {
             opacity: 0.45;
-            background-color: #cfe2ff !important;
+            background-color: #d6e4f0 !important;
         }
 
         #modal-products-table tbody tr,
@@ -135,11 +204,14 @@
         .company-select-nav {
             max-width: 280px;
             font-weight: 600;
+            background-color: #ffffff;
+            color: #000000;
+            border-color: #ffffff;
         }
 
         .odoo-link-btn {
-            color: #017e84;
-            font-weight: 600;
+            color: var(--brand-header);
+            font-weight: 700;
             text-decoration: none;
             cursor: pointer;
             font-size: 0.84rem;
@@ -147,33 +219,30 @@
 
         .odoo-link-btn:hover {
             text-decoration: underline;
-            color: #015c61;
+            color: var(--brand-btn);
         }
 
-        .btn-odoo-primary {
-            background-color: #714B67;
-            border-color: #714B67;
-            color: #fff;
-        }
-
-        .btn-odoo-primary:hover {
-            background-color: #5d3d54;
-            border-color: #5d3d54;
-            color: #fff;
+        .text-brand-code {
+            color: var(--brand-header);
         }
     </style>
 </head>
 
 <body>
-    <!-- BARRA SUPERIOR -->
-    <nav class="navbar navbar-dark bg-dark px-3 py-2 mb-3">
+    <!-- BARRA SUPERIOR (#2f3787) -->
+    <nav class="navbar navbar-dark navbar-argelec px-3 py-2 mb-3">
         <div class="container-fluid d-flex flex-wrap justify-content-between align-items-center gap-2">
             <div class="d-flex flex-wrap align-items-center gap-2">
-                <span class="navbar-brand fw-bold mb-0 h6 me-1">Cotizador Odoo</span>
+                <a href="/" class="brand-logo-box text-decoration-none me-1" title="Argelec Materiales Eléctricos">
+                    <img src="/static/logo-argelec.png" alt="Argelec" style="height: 30px; width: auto;"
+                        onerror="this.style.display='none'; this.nextElementSibling.style.display='inline';">
+                    <span style="display:none; color:#2f3787; font-weight:800;">ARGELEC</span>
+                </a>
+                <span class="text-white fw-bold me-1">Cotizador</span>
+
                 <div class="d-flex align-items-center gap-1">
-                    <span class="text-light small opacity-75">Empresa:</span>
-                    <select id="company-select"
-                        class="form-select form-select-sm bg-success text-white border-success company-select-nav"
+                    <span class="text-white small">Empresa:</span>
+                    <select id="company-select" class="form-select form-select-sm company-select-nav"
                         onchange="onCompanyChange()">
                         {% for comp in user.allowed_companies %}
                         <option value="{{ comp.id }}" {% if comp.id==user.default_company_id %}selected{% endif %}>
@@ -182,19 +251,21 @@
                         {% endfor %}
                     </select>
                 </div>
-                <button class="btn btn-warning btn-sm fw-semibold ms-1" onclick="openLoadQuotationModal()">
+
+                <button class="btn btn-brand btn-sm fw-semibold ms-1" onclick="openLoadQuotationModal()">
                     Cargar Cotización Previa
                 </button>
             </div>
+
             <div class="d-flex flex-wrap align-items-center gap-2 text-white small">
-                <span id="sync-badge" class="badge bg-info text-dark">Cargando estado...</span>
+                <span id="sync-badge" class="badge bg-light text-dark">Cargando estado...</span>
                 {% if user.is_env_admin %}
                 <button id="btn-sync" class="btn btn-outline-light btn-sm" onclick="triggerSync()">
                     Sincronizar Odoo
                 </button>
                 {% endif %}
-                <span class="text-light opacity-75">Operador: <strong>{{ user.name }}</strong></span>
-                <a href="/logout" class="btn btn-danger btn-sm">Salir</a>
+                <span class="text-white">Operador: <strong>{{ user.name }}</strong></span>
+                <a href="/logout" class="btn btn-outline-light btn-sm">Salir</a>
             </div>
         </div>
     </nav>
@@ -202,9 +273,10 @@
     <div class="container-fluid px-3 pb-4">
         <!-- BANNER DE MODO (NUEVA vs EDICIÓN DE COTIZACIÓN PREVIA) -->
         <div id="editing-banner"
-            class="alert alert-warning py-2 px-3 mb-2 d-none d-flex justify-content-between align-items-center shadow-sm">
+            class="alert alert-warning py-2 px-3 mb-2 d-none d-flex justify-content-between align-items-center shadow-sm"
+            style="color: #000000;">
             <div>
-                <span class="badge bg-dark me-2">MODO EDICIÓN</span>
+                <span class="badge me-2" style="background-color: #2f3787; color: #fff;">MODO EDICIÓN</span>
                 Modificando cotización existente: <strong id="editing-order-title" class="fs-6"></strong>
             </div>
             <button class="btn btn-outline-dark btn-sm fw-semibold" onclick="startNewQuotation()">
@@ -215,20 +287,24 @@
         <!-- CABECERA ESTILO FICHA ODOO -->
         <div class="odoo-sheet p-3 mb-3">
             <div class="d-flex justify-content-between align-items-center border-bottom pb-2 mb-3">
-                <h5 id="sheet-title" class="mb-0 fw-bold text-dark">Nuevo Presupuesto (Borrador)</h5>
-                <span id="header-company-label"
-                    class="badge bg-success-subtle text-success border border-success-subtle fs-6"></span>
+                <div class="d-flex align-items-center gap-2">
+                    <img src="/static/isotipo-argelec.png" alt="" style="height: 22px; width: auto;"
+                        onerror="this.style.display='none'">
+                    <h5 id="sheet-title" class="mb-0 fw-bold" style="color: #000000;">Nuevo Presupuesto (Borrador)</h5>
+                </div>
+                <span id="header-company-label" class="badge fs-6"
+                    style="background-color: #2f3787; color: #ffffff;"></span>
             </div>
 
             <div class="row g-4">
-                <!-- COLUMNA IZQUIERDA ODOO: CLIENTE + DIRECCIÓN FACTURA + DIRECCIÓN ENTREGA (CON MISMO FORMATO Y BÚSQUEDA) -->
+                <!-- COLUMNA IZQUIERDA ODOO: CLIENTE + DIRECCIÓN FACTURA + DIRECCIÓN ENTREGA -->
                 <div class="col-12 col-lg-7">
                     <!-- 1. CLIENTE PRINCIPAL -->
                     <div class="row mb-3 align-items-start">
                         <div class="col-12 col-sm-4 odoo-field-label pt-1">
                             Cliente *
-                            <div class="text-muted fw-normal" style="font-size: 0.74rem;">Nombre, CUIT o Cód. Interno
-                            </div>
+                            <div class="fw-normal" style="font-size: 0.74rem; color: #333333;">Nombre, CUIT o Cód.
+                                Interno</div>
                         </div>
                         <div class="col-12 col-sm-8 position-relative">
                             <div id="box-search-main">
@@ -242,11 +318,11 @@
                         </div>
                     </div>
 
-                    <!-- 2. DIRECCIÓN DE FACTURA (EDITABLE - CUALQUIER CLIENTE/CONTACTO) -->
+                    <!-- 2. DIRECCIÓN DE FACTURA -->
                     <div class="row mb-3 align-items-start">
                         <div class="col-12 col-sm-4 odoo-field-label pt-1">
                             Dirección de factura
-                            <div class="text-muted fw-normal" style="font-size: 0.74rem;">Por defecto del cliente o
+                            <div class="fw-normal" style="font-size: 0.74rem; color: #333333;">Por defecto del cliente o
                                 cualquier otro</div>
                         </div>
                         <div class="col-12 col-sm-8 position-relative">
@@ -262,11 +338,11 @@
                         </div>
                     </div>
 
-                    <!-- 3. DIRECCIÓN DE ENTREGA (EDITABLE - CUALQUIER CLIENTE/CONTACTO) -->
+                    <!-- 3. DIRECCIÓN DE ENTREGA -->
                     <div class="row mb-1 align-items-start">
                         <div class="col-12 col-sm-4 odoo-field-label pt-1">
                             Dirección de entrega
-                            <div class="text-muted fw-normal" style="font-size: 0.74rem;">Por defecto del cliente o
+                            <div class="fw-normal" style="font-size: 0.74rem; color: #333333;">Por defecto del cliente o
                                 cualquier otro</div>
                         </div>
                         <div class="col-12 col-sm-8 position-relative">
@@ -339,10 +415,11 @@
         <!-- GRILLA DE LÍNEAS DE COTIZACIÓN (PRODUCTOS, SECCIONES Y NOTAS) -->
         <div class="odoo-sheet p-2">
             <div class="d-flex justify-content-between align-items-center px-2 py-1 border-bottom mb-2">
-                <span class="fw-bold text-uppercase small text-secondary">Líneas del Pedido</span>
+                <span class="fw-bold text-uppercase small" style="color: #2f3787;">Líneas del Pedido</span>
                 <span id="price-recalc-badge" class="badge bg-warning text-dark d-none">Calculando precios de
                     lista...</span>
-                <span class="small text-muted"><strong>Tab</strong> salta solo entre Cantidad → Precio → Dto %</span>
+                <span class="small" style="color: #333333;"><strong>Tab</strong> salta solo entre Cantidad → Precio →
+                    Dto %</span>
             </div>
 
             <div class="table-responsive">
@@ -360,7 +437,7 @@
                     <span class="odoo-link-btn" onclick="addNoteRow()">+ Agregar una nota</span>
                 </div>
                 <div>
-                    <button type="button" class="btn btn-outline-secondary btn-sm fw-semibold"
+                    <button type="button" class="btn btn-outline-brand btn-sm fw-semibold"
                         onclick="openDiscountWizard()">
                         % Descuento
                     </button>
@@ -373,10 +450,10 @@
                 </div>
                 <div class="d-flex flex-wrap align-items-center gap-3">
                     <div class="text-end">
-                        <span class="text-muted small d-block">Subtotal Neto (sin IVA)</span>
-                        <span id="grid-subtotal" class="fs-5 fw-bold text-dark">$ 0.00</span>
+                        <span class="small d-block" style="color: #333333;">Subtotal Neto (sin IVA)</span>
+                        <span id="grid-subtotal" class="fs-5 fw-bold" style="color: #000000;">$ 0.00</span>
                     </div>
-                    <button id="btn-send-odoo" class="btn btn-success fw-bold px-4" onclick="submitQuotation()">
+                    <button id="btn-send-odoo" class="btn btn-brand fw-bold px-4" onclick="submitQuotation()">
                         Enviar Cotización a Odoo (Borrador)
                     </button>
                 </div>
@@ -390,7 +467,7 @@
     <div class="modal fade" id="productSearchModal" tabindex="-1" aria-hidden="true">
         <div class="modal-dialog modal-xl modal-fullscreen-md-down modal-dialog-scrollable">
             <div class="modal-content">
-                <div class="modal-header py-2 bg-dark text-white d-flex flex-wrap gap-2">
+                <div class="modal-header py-2 modal-header-argelec d-flex flex-wrap gap-2">
                     <h6 class="modal-title fw-bold mb-0">
                         Seleccionar Productos — Fila #<span id="modal-target-row">1</span>
                     </h6>
@@ -405,23 +482,23 @@
                     </div>
                 </div>
                 <div class="modal-body p-2">
-                    <div
-                        class="alert alert-light border py-1 px-2 mb-2 small text-muted d-flex justify-content-between align-items-center">
+                    <div class="alert alert-light border py-1 px-2 mb-2 small d-flex justify-content-between align-items-center"
+                        style="color: #000000;">
                         <span>Tildá uno o varios productos y presioná <strong>Insertar seleccionados</strong>, o hacé
                             doble clic para insertar uno directo.</span>
-                        <button type="button" class="btn btn-link btn-sm p-0 text-decoration-none"
-                            onclick="clearModalSelection()">Limpiar selección</button>
+                        <button type="button" class="btn btn-link btn-sm p-0 text-decoration-none fw-semibold"
+                            style="color: #2f3787;" onclick="clearModalSelection()">Limpiar selección</button>
                     </div>
                     <div class="table-responsive">
                         <table id="modal-products-table" class="table table-striped table-hover table-sm w-100"></table>
                     </div>
                 </div>
                 <div class="modal-footer py-2 bg-light d-flex justify-content-between">
-                    <span id="modal-selected-summary" class="small fw-semibold text-primary">0 productos
+                    <span id="modal-selected-summary" class="small fw-bold" style="color: #2f3787;">0 productos
                         seleccionados</span>
                     <div class="d-flex gap-2">
                         <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancelar</button>
-                        <button type="button" id="btn-insert-selected" class="btn btn-success btn-sm fw-bold px-3"
+                        <button type="button" id="btn-insert-selected" class="btn btn-brand btn-sm fw-bold px-3"
                             onclick="insertSelectedProducts()" disabled>
                             Insertar seleccionados (0)
                         </button>
@@ -435,7 +512,7 @@
     <div class="modal fade" id="loadQuotationModal" tabindex="-1" aria-hidden="true">
         <div class="modal-dialog modal-lg modal-dialog-scrollable">
             <div class="modal-content">
-                <div class="modal-header py-2 bg-dark text-white">
+                <div class="modal-header py-2 modal-header-argelec">
                     <h6 class="modal-title fw-bold mb-0">Cargar Cotización Previa (Borrador / Enviada)</h6>
                     <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"
                         aria-label="Cerrar"></button>
@@ -445,7 +522,7 @@
                         <input type="text" id="prev-quote-search" class="form-control"
                             placeholder="Buscar por número (ej. S00064), cliente, OC o referencia..."
                             oninput="debouncedSearchQuotations()">
-                        <button class="btn btn-primary" type="button"
+                        <button class="btn btn-brand fw-semibold" type="button"
                             onclick="fetchPreviousQuotations()">Buscar</button>
                     </div>
                     <div class="table-responsive">
@@ -463,7 +540,7 @@
                             </thead>
                             <tbody id="prev-quotes-tbody">
                                 <tr>
-                                    <td colspan="7" class="text-center text-muted py-3">Cargando cotizaciones...</td>
+                                    <td colspan="7" class="text-center py-3">Cargando cotizaciones...</td>
                                 </tr>
                             </tbody>
                         </table>
@@ -473,56 +550,54 @@
         </div>
     </div>
 
-    <!-- MODAL 3: ASISTENTE DE DESCUENTOS (ESTILO ODOO / ADHOC) -->
+    <!-- MODAL 3: ASISTENTE DE DESCUENTOS -->
     <div class="modal fade" id="discountWizardModal" tabindex="-1" aria-hidden="true">
         <div class="modal-dialog modal-dialog-centered">
             <div class="modal-content">
-                <div class="modal-header py-2">
+                <div class="modal-header py-2 modal-header-argelec">
                     <h5 class="modal-title fw-bold">Descuento</h5>
-                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Cerrar"></button>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"
+                        aria-label="Cerrar"></button>
                 </div>
                 <div class="modal-body">
                     <div class="row g-3 align-items-start">
                         <div class="col-6">
                             <div id="disc-pct-inputs">
                                 <div class="row mb-2 align-items-center">
-                                    <label class="col-6 col-form-label col-form-label-sm fw-semibold">Desc. 1
-                                        (%)</label>
+                                    <label class="col-6 col-form-label col-form-label-sm fw-bold">Desc. 1 (%)</label>
                                     <div class="col-5">
                                         <input type="number" step="0.01" min="0" max="100" id="disc-1"
                                             class="form-control form-control-sm text-end" value="0"
                                             oninput="recalcWizardDiscount()">
                                     </div>
-                                    <div class="col-1 px-0 small text-muted">%</div>
+                                    <div class="col-1 px-0 small">%</div>
                                 </div>
                                 <div class="row mb-2 align-items-center">
-                                    <label class="col-6 col-form-label col-form-label-sm fw-semibold">Desc. 2
-                                        (%)</label>
+                                    <label class="col-6 col-form-label col-form-label-sm fw-bold">Desc. 2 (%)</label>
                                     <div class="col-5">
                                         <input type="number" step="0.01" min="0" max="100" id="disc-2"
                                             class="form-control form-control-sm text-end" value="0"
                                             oninput="recalcWizardDiscount()">
                                     </div>
-                                    <div class="col-1 px-0 small text-muted">%</div>
+                                    <div class="col-1 px-0 small">%</div>
                                 </div>
                                 <div class="row mb-2 align-items-center">
-                                    <label class="col-6 col-form-label col-form-label-sm fw-semibold">Desc. 3
-                                        (%)</label>
+                                    <label class="col-6 col-form-label col-form-label-sm fw-bold">Desc. 3 (%)</label>
                                     <div class="col-5">
                                         <input type="number" step="0.01" min="0" max="100" id="disc-3"
                                             class="form-control form-control-sm text-end" value="0"
                                             oninput="recalcWizardDiscount()">
                                     </div>
-                                    <div class="col-1 px-0 small text-muted">%</div>
+                                    <div class="col-1 px-0 small">%</div>
                                 </div>
                                 <div class="row mt-3 pt-2 border-top align-items-center">
-                                    <span class="col-6 small text-muted fw-semibold">Descuento</span>
-                                    <span id="disc-effective-label" class="col-6 fw-bold text-dark">0%</span>
+                                    <span class="col-6 small fw-bold">Descuento</span>
+                                    <span id="disc-effective-label" class="col-6 fw-bold">0%</span>
                                 </div>
                             </div>
 
                             <div id="disc-fixed-input" class="d-none">
-                                <label class="form-label small fw-semibold">Importe fijo (<span
+                                <label class="form-label small fw-bold">Importe fijo (<span
                                         id="disc-fixed-curr">$</span>)</label>
                                 <input type="number" step="0.01" min="0" id="disc-fixed-amount"
                                     class="form-control form-control-sm text-end" value="0">
@@ -533,21 +608,21 @@
                             <div class="form-check mb-2">
                                 <input class="form-check-input" type="radio" name="discountMode" id="mode-sol"
                                     value="sol_discount" checked onchange="toggleDiscountMode()">
-                                <label class="form-check-label small fw-semibold" for="mode-sol">
+                                <label class="form-check-label small fw-bold" for="mode-sol">
                                     En todas las líneas de la orden
                                 </label>
                             </div>
                             <div class="form-check mb-2">
                                 <input class="form-check-input" type="radio" name="discountMode" id="mode-global"
                                     value="global_discount" onchange="toggleDiscountMode()">
-                                <label class="form-check-label small fw-semibold" for="mode-global">
+                                <label class="form-check-label small fw-bold" for="mode-global">
                                     Descuento global
                                 </label>
                             </div>
                             <div class="form-check">
                                 <input class="form-check-input" type="radio" name="discountMode" id="mode-fixed"
                                     value="amount" onchange="toggleDiscountMode()">
-                                <label class="form-check-label small fw-semibold" for="mode-fixed">
+                                <label class="form-check-label small fw-bold" for="mode-fixed">
                                     Importe fijo
                                 </label>
                             </div>
@@ -555,7 +630,7 @@
                     </div>
                 </div>
                 <div class="modal-footer justify-content-start py-2">
-                    <button type="button" class="btn btn-odoo-primary btn-sm px-3 fw-semibold"
+                    <button type="button" class="btn btn-brand btn-sm px-3 fw-semibold"
                         onclick="applyDiscountWizard()">Aplicar</button>
                     <button type="button" class="btn btn-light border btn-sm px-3"
                         data-bs-dismiss="modal">Descartar</button>
@@ -646,7 +721,6 @@
                 $('#disc-1').focus().select();
             });
 
-            // Cerrar dropdowns de clientes al hacer clic fuera
             $(document).on('click', function (e) {
                 if (!$(e.target).closest('#box-search-main').length) $('#dropdown-main').addClass('d-none');
                 if (!$(e.target).closest('#box-search-invoice').length) $('#dropdown-invoice').addClass('d-none');
@@ -693,7 +767,7 @@
             const infoBox = $('#pricelist-currency-info').empty();
 
             if (pl) {
-                let html = `<span class="badge bg-primary-subtle text-primary border border-primary-subtle">Moneda: ${escapeHtml(pl.currency_name)} (${escapeHtml(pl.currency_symbol)})</span>`;
+                let html = `<span class="badge border" style="background-color: #eef3f8; color: #2f3787;">Moneda: ${escapeHtml(pl.currency_name)} (${escapeHtml(pl.currency_symbol)})</span>`;
                 if (pl.is_foreign) {
                     html += `<span class="badge bg-light text-dark border">TC: 1 ${escapeHtml(pl.currency_name)} = ${pl.exchange_rate.toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 4 })} ${escapeHtml(baseCurrency.name)}</span>`;
                 }
@@ -773,7 +847,7 @@
         function enablePartnerSlotChange(slot) {
             $(`#card-${slot}`).addClass('d-none');
             $(`#box-search-${slot}`).removeClass('d-none');
-            const inp = $(`#input-search-${slot}`).val('').focus();
+            $(`#input-search-${slot}`).val('').focus();
             if (slot !== 'main') {
                 showRelatedAddressesInDropdown(slot);
             }
@@ -790,13 +864,13 @@
                 ? `<span class="badge bg-light text-dark border">CUIT: ${escapeHtml(cardData.vat)}</span>`
                 : '';
             const typeBadge = (slot !== 'main' && cardData.type_label)
-                ? `<span class="badge bg-info-subtle text-dark border">${escapeHtml(cardData.type_label)}</span>`
+                ? `<span class="badge border" style="background-color:#eef3f8; color:#2f3787;">${escapeHtml(cardData.type_label)}</span>`
                 : '';
             const phoneSpan = cardData.phone
-                ? `<span class="small text-muted">Tel: ${escapeHtml(cardData.phone)}</span>`
+                ? `<span class="small" style="color: #222222;">Tel: ${escapeHtml(cardData.phone)}</span>`
                 : '';
             const parentSubtitle = (cardData.parent_name && cardData.parent_name !== cardData.name)
-                ? `<div class="small text-muted fw-semibold">${escapeHtml(cardData.parent_name)}</div>`
+                ? `<div class="small fw-semibold" style="color: #333333;">${escapeHtml(cardData.parent_name)}</div>`
                 : '';
 
             const addrHtml = (cardData.address_lines && cardData.address_lines.length)
@@ -809,16 +883,16 @@
                 <div class="d-flex justify-content-between align-items-start gap-2">
                     <div>
                         ${parentSubtitle}
-                        <div class="${nameSizeClass} fw-bold text-dark lh-sm">${escapeHtml(cardData.name)}</div>
+                        <div class="${nameSizeClass} fw-bold lh-sm" style="color: #000000;">${escapeHtml(cardData.name)}</div>
                         <div class="mt-1 d-flex flex-wrap gap-1 align-items-center">
                             ${codeBadge}
                             ${vatBadge}
                             ${typeBadge}
                             ${phoneSpan}
                         </div>
-                        <div class="small text-secondary mt-1">${addrHtml}</div>
+                        <div class="small mt-1" style="color: #111111;">${addrHtml}</div>
                     </div>
-                    <button type="button" class="btn btn-outline-secondary btn-sm text-nowrap" onclick="enablePartnerSlotChange('${slot}')">
+                    <button type="button" class="btn btn-outline-brand btn-sm text-nowrap" onclick="enablePartnerSlotChange('${slot}')">
                         Cambiar
                     </button>
                 </div>
@@ -835,12 +909,12 @@
             if (q.length >= 2) return;
 
             const dd = $(`#dropdown-${slot}`).empty();
-            dd.append('<div class="list-group-item py-1 px-2 bg-light small fw-bold text-secondary">Direcciones del cliente actual (o escribí para buscar otro):</div>');
+            dd.append('<div class="list-group-item py-1 px-2 bg-light small fw-bold" style="color:#2f3787;">Direcciones del cliente actual (o escribí para buscar otro):</div>');
             relatedCustomerAddresses.forEach(addr => {
                 const codeTag = addr.internal_code ? `<span class="badge bg-secondary me-1">${escapeHtml(addr.internal_code)}</span>` : '';
-                const typeTag = `<span class="badge bg-info-subtle text-dark border ms-1">${escapeHtml(addr.type_label)}</span>`;
-                const item = $(`<button type="button" class="list-group-item list-group-item-action py-1 px-2 text-start"></button>`)
-                    .html(`<div>${codeTag}<strong>${escapeHtml(addr.name)}</strong>${typeTag}</div><div class="text-muted" style="font-size:0.76rem;">${escapeHtml(addr.address_text)}</div>`)
+                const typeTag = `<span class="badge border ms-1" style="background-color:#eef3f8; color:#2f3787;">${escapeHtml(addr.type_label)}</span>`;
+                const item = $(`<button type="button" class="list-group-item list-group-item-action py-1 px-2 text-start" style="color:#000000;"></button>`)
+                    .html(`<div>${codeTag}<strong>${escapeHtml(addr.name)}</strong>${typeTag}</div><div style="font-size:0.76rem; color:#222222;">${escapeHtml(addr.address_text)}</div>`)
                     .on('click', () => renderPartnerCard(slot, addr));
                 dd.append(item);
             });
@@ -867,16 +941,16 @@
                 }, function (list) {
                     const dd = $(`#dropdown-${slot}`).empty();
                     if (!list.length) {
-                        dd.append('<div class="list-group-item small text-muted">Sin resultados</div>').removeClass('d-none');
+                        dd.append('<div class="list-group-item small">Sin resultados</div>').removeClass('d-none');
                         return;
                     }
                     list.forEach(c => {
                         const codeTag = c.internal_code ? `<span class="badge bg-secondary me-1">${escapeHtml(c.internal_code)}</span>` : '';
-                        const vatTag = c.vat ? `<span class="text-muted ms-1">(${escapeHtml(c.vat)})</span>` : '';
-                        const parentTag = c.parent_name ? `<span class="text-primary small"> [${escapeHtml(c.parent_name)}]</span>` : '';
-                        const cityTag = (c.street || c.city) ? `<div class="text-muted" style="font-size:0.76rem;">${escapeHtml(c.street || '')} ${escapeHtml(c.city || '')}</div>` : '';
+                        const vatTag = c.vat ? `<span class="ms-1" style="color:#333333;">(${escapeHtml(c.vat)})</span>` : '';
+                        const parentTag = c.parent_name ? `<span class="small fw-semibold" style="color:#2f3787;"> [${escapeHtml(c.parent_name)}]</span>` : '';
+                        const cityTag = (c.street || c.city) ? `<div style="font-size:0.76rem; color:#222222;">${escapeHtml(c.street || '')} ${escapeHtml(c.city || '')}</div>` : '';
 
-                        const item = $(`<button type="button" class="list-group-item list-group-item-action py-1 px-2 text-start"></button>`)
+                        const item = $(`<button type="button" class="list-group-item list-group-item-action py-1 px-2 text-start" style="color:#000000;"></button>`)
                             .html(`<div>${codeTag}<strong>${escapeHtml(c.name)}</strong>${parentTag}${vatTag}</div>${cityTag}`)
                             .on('click', () => {
                                 if (slot === 'main') {
@@ -935,10 +1009,10 @@
                         <th>Estado</th>
             `;
             compWarehouses.forEach(wh => {
-                theadHtml += `<th class="text-end bg-info-subtle" title="${escapeHtml(wh.name)}">${escapeHtml(wh.code)}</th>`;
+                theadHtml += `<th class="text-end" style="background-color:#e8eff7;" title="${escapeHtml(wh.name)}">${escapeHtml(wh.code)}</th>`;
             });
             theadHtml += `
-                        <th class="text-end bg-primary-subtle">Total</th>
+                        <th class="text-end" style="background-color:#d5e2f0;">Total</th>
                     </tr>
                 </thead>
             `;
@@ -954,16 +1028,16 @@
                         return `<input type="checkbox" class="form-check-input prod-select-chk" ${checked}>`;
                     }
                 },
-                { data: 'default_code', className: 'fw-semibold text-nowrap' },
+                { data: 'default_code', className: 'fw-bold text-nowrap text-brand-code' },
                 { data: 'name' },
-                { data: 'brand', className: 'small fw-semibold text-primary' },
+                { data: 'brand', className: 'small fw-semibold' },
                 {
                     data: 'list_price',
                     className: 'text-end text-nowrap',
                     render: d => '$ ' + parseFloat(d || 0).toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
                 },
                 { data: 'taxes_id', orderable: false, className: 'small' },
-                { data: 'barcode_ids', className: 'small text-muted' },
+                { data: 'barcode_ids', className: 'small' },
                 { data: 'estado', className: 'small' }
             ];
 
@@ -1056,10 +1130,10 @@
         }
 
         function formatStock(val) {
-            if (val === null || val === undefined) return '<span class="text-muted">-</span>';
+            if (val === null || val === undefined) return '<span>-</span>';
             const num = parseFloat(val || 0);
             if (num > 0) return `<span class="text-success fw-bold">${num}</span>`;
-            return `<span class="text-muted">0</span>`;
+            return `<span style="color:#555555;">0</span>`;
         }
 
         function reloadModalTable() {
@@ -1237,10 +1311,10 @@
                     <th class="text-end" style="width: 120px;">Subtotal</th>
             `;
             compWarehouses.forEach(wh => {
-                headHtml += `<th class="text-end bg-info-subtle" style="width: 68px;" title="${escapeHtml(wh.name)}">${escapeHtml(wh.code)}</th>`;
+                headHtml += `<th class="text-end" style="width: 68px; background-color:#e8eff7;" title="${escapeHtml(wh.name)}">${escapeHtml(wh.code)}</th>`;
             });
             headHtml += `
-                    <th class="text-end bg-primary-subtle" style="width: 72px;">Total</th>
+                    <th class="text-end" style="width: 72px; background-color:#d5e2f0;">Total</th>
                     <th class="text-center" style="width: 38px;"></th>
                 </tr>
             `;
@@ -1253,9 +1327,9 @@
                 const orderCell = `
                     <td class="text-center text-nowrap">
                         <span class="drag-handle me-1" title="Arrastrar para reordenar">⠿</span>
-                        <span class="fw-bold text-muted me-1">${idx + 1}</span>
-                        <button type="button" tabindex="-1" class="btn btn-link btn-sm p-0 text-secondary text-decoration-none" onclick="moveRow(${idx}, -1)" title="Subir">↑</button>
-                        <button type="button" tabindex="-1" class="btn btn-link btn-sm p-0 text-secondary text-decoration-none" onclick="moveRow(${idx}, 1)" title="Bajar">↓</button>
+                        <span class="fw-bold me-1">${idx + 1}</span>
+                        <button type="button" tabindex="-1" class="btn btn-link btn-sm p-0 text-dark text-decoration-none" onclick="moveRow(${idx}, -1)" title="Subir">↑</button>
+                        <button type="button" tabindex="-1" class="btn btn-link btn-sm p-0 text-dark text-decoration-none" onclick="moveRow(${idx}, 1)" title="Bajar">↓</button>
                     </td>
                 `;
                 const deleteCell = `
@@ -1270,7 +1344,7 @@
                             ${orderCell}
                             <td colspan="${totalColsCount - 2}">
                                 <div class="d-flex align-items-center gap-2">
-                                    <span class="badge bg-dark">SECCIÓN</span>
+                                    <span class="badge" style="background-color:#2f3787; color:#ffffff;">SECCIÓN</span>
                                     <input id="text-input-${idx}" tabindex="-1" type="text" class="form-control form-control-sm"
                                            value="${escapeHtml(r.name)}"
                                            placeholder="Nombre de la sección..."
@@ -1289,7 +1363,7 @@
                             ${orderCell}
                             <td colspan="${totalColsCount - 2}">
                                 <div class="d-flex align-items-center gap-2">
-                                    <span class="badge bg-secondary">NOTA</span>
+                                    <span class="badge" style="background-color:#5184af; color:#ffffff;">NOTA</span>
                                     <input id="text-input-${idx}" tabindex="-1" type="text" class="form-control form-control-sm"
                                            value="${escapeHtml(r.name)}"
                                            placeholder="Texto de la nota..."
@@ -1307,8 +1381,8 @@
                 totalNet += lineSubtotal;
 
                 const prodDisplay = hasProd
-                    ? `<div class="fw-bold text-primary">${escapeHtml(r.default_code)}</div>`
-                    : `<span class="text-muted small">Clic para buscar...</span>`;
+                    ? `<div class="fw-bold text-brand-code">${escapeHtml(r.default_code)}</div>`
+                    : `<span class="small" style="color:#333333;">Clic para buscar...</span>`;
 
                 let stockCellsHtml = '';
                 let rowTotalStock = 0;
@@ -1324,8 +1398,8 @@
                 });
 
                 const totalStockCellHtml = hasProd
-                    ? `<td class="text-end stock-badge fw-bold bg-primary-subtle">${formatStock(Math.round(rowTotalStock * 10000) / 10000)}</td>`
-                    : `<td class="text-end stock-badge bg-primary-subtle">-</td>`;
+                    ? `<td class="text-end stock-badge fw-bold" style="background-color:#eef3f8;">${formatStock(Math.round(rowTotalStock * 10000) / 10000)}</td>`
+                    : `<td class="text-end stock-badge" style="background-color:#eef3f8;">-</td>`;
 
                 tbody.append(`
                     <tr>
@@ -1342,7 +1416,7 @@
                                    ${hasProd ? '' : 'disabled'}
                                    oninput="updateGridFieldInPlace(${idx}, 'name', this.value)">
                         </td>
-                        <td class="small fw-semibold text-secondary">${hasProd ? escapeHtml(r.brand) : '-'}</td>
+                        <td class="small fw-semibold">${hasProd ? escapeHtml(r.brand) : '-'}</td>
                         <td>
                             <input id="qty-input-${idx}" type="number" step="1" min="0.01"
                                    class="form-control form-control-sm text-end grid-nav-input"
@@ -1388,7 +1462,7 @@
                 .replace(/"/g, '&quot;');
         }
 
-        // --- ASISTENTE DE DESCUENTOS (ESTILO ODOO / ADHOC) ---
+        // --- ASISTENTE DE DESCUENTOS ---
         function openDiscountWizard() {
             const validProds = rows.filter(r => r.row_type === 'product' && r.product_id !== null);
             if (!validProds.length) {
@@ -1514,29 +1588,29 @@
 
         function fetchPreviousQuotations() {
             const q = $('#prev-quote-search').val().trim();
-            const tbody = $('#prev-quotes-tbody').html('<tr><td colspan="7" class="text-center text-muted py-3">Buscando en Odoo...</td></tr>');
+            const tbody = $('#prev-quotes-tbody').html('<tr><td colspan="7" class="text-center py-3">Buscando en Odoo...</td></tr>');
 
             $.get('/api/quotations/search', { company_id: getSelectedCompanyId(), q }, function (orders) {
                 tbody.empty();
                 if (!orders.length) {
-                    tbody.append('<tr><td colspan="7" class="text-center text-muted py-3">No se encontraron cotizaciones abiertas en esta empresa.</td></tr>');
+                    tbody.append('<tr><td colspan="7" class="text-center py-3">No se encontraron cotizaciones abiertas en esta empresa.</td></tr>');
                     return;
                 }
                 orders.forEach(o => {
                     const pName = Array.isArray(o.partner_id) ? o.partner_id[1] : '';
                     const stBadge = o.state === 'sent'
-                        ? '<span class="badge bg-info text-dark">Enviado</span>'
+                        ? '<span class="badge" style="background-color:#5184af; color:#fff;">Enviado</span>'
                         : '<span class="badge bg-secondary">Borrador</span>';
 
                     const tr = $(`
                         <tr>
-                            <td class="fw-bold text-primary">${escapeHtml(o.name)}</td>
+                            <td class="fw-bold text-brand-code">${escapeHtml(o.name)}</td>
                             <td class="small text-nowrap">${escapeHtml((o.date_order || '').slice(0, 16))}</td>
                             <td class="small">${escapeHtml(pName)}</td>
-                            <td class="small text-muted">${escapeHtml(o.client_order_ref || '')}</td>
+                            <td class="small">${escapeHtml(o.client_order_ref || '')}</td>
                             <td class="text-end fw-semibold text-nowrap">$ ${parseFloat(o.amount_total || 0).toLocaleString('es-AR', { minimumFractionDigits: 2 })}</td>
                             <td class="text-center">${stBadge}</td>
-                            <td class="text-center"><button class="btn btn-primary btn-sm py-0 px-2">Cargar</button></td>
+                            <td class="text-center"><button class="btn btn-brand btn-sm py-0 px-2">Cargar</button></td>
                         </tr>
                     `);
                     tr.on('click', () => loadQuotationIntoEditor(o.id));
@@ -1548,7 +1622,7 @@
         }
 
         function loadQuotationIntoEditor(orderId) {
-            const tbody = $('#prev-quotes-tbody').html('<tr><td colspan="7" class="text-center text-primary py-3">Cargando datos de la cotización...</td></tr>');
+            const tbody = $('#prev-quotes-tbody').html('<tr><td colspan="7" class="text-center py-3">Cargando datos de la cotización...</td></tr>');
             $.get(`/api/quotations/${orderId}`, { company_id: getSelectedCompanyId() }, function (data) {
                 loadQuoteModal.hide();
 
@@ -1673,16 +1747,16 @@
                 const badge = $('#sync-badge');
                 const btn = $('#btn-sync');
                 if (res.status === 'running') {
-                    badge.removeClass('bg-info bg-danger').addClass('bg-warning text-dark').text('Sincronizando: ' + res.message);
-                    btn.prop('disabled', true);
+                    badge.removeClass('bg-light bg-danger text-white').addClass('bg-warning text-dark').text('Sincronizando: ' + res.message);
+                    if (btn.length) btn.prop('disabled', true);
                 } else if (res.status === 'error') {
-                    badge.removeClass('bg-info bg-warning').addClass('bg-danger text-white').text(res.message);
-                    btn.prop('disabled', false);
+                    badge.removeClass('bg-light bg-warning text-dark').addClass('bg-danger text-white').text(res.message);
+                    if (btn.length) btn.prop('disabled', false);
                 } else {
                     const last = res.last_sync ? ` | Última: ${res.last_sync}` : '';
-                    badge.removeClass('bg-warning bg-danger').addClass('bg-info text-dark')
+                    badge.removeClass('bg-warning bg-danger text-white').addClass('bg-light text-dark')
                         .text(`${res.total_products.toLocaleString('es-AR')} productos${last}`);
-                    btn.prop('disabled', false);
+                    if (btn.length) btn.prop('disabled', false);
                     if (allWarehouses.length === 0 && res.total_products > 0) {
                         $.get('/api/warehouses', function (whs) {
                             allWarehouses = whs;
@@ -1756,7 +1830,7 @@
                     alertBox.removeClass('d-none alert-danger').addClass('alert-success').html(
                         `Cotización <strong>${res.order_name}</strong> ${res.action_label} con éxito en <strong>${escapeHtml(getSelectedCompanyName())}</strong> ` +
                         `(Total c/imp: ${sym} ${res.amount_total.toLocaleString('es-AR', { minimumFractionDigits: 2 })}). ` +
-                        `<a href="${res.odoo_link}" target="_blank" class="fw-bold">Abrir en Odoo →</a>`
+                        `<a href="${res.odoo_link}" target="_blank" class="fw-bold" style="color:#2f3787;">Abrir en Odoo →</a>`
                     );
                     exitEditModeUI();
                     rows = [createEmptyProductRowObj()];

@@ -3,6 +3,7 @@ import time
 import threading
 from fastapi import FastAPI, Request, Form, HTTPException, Depends
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 from pydantic import BaseModel
@@ -35,9 +36,12 @@ from app.odoo_client import (
 
 load_dotenv()
 
-app = FastAPI(title="Cotizador Odoo")
+app = FastAPI(title="Cotizador Argelec - Odoo")
 SECRET_KEY = os.getenv("SECRET_KEY", "cambia-esta-clave-secreta-en-coolify")
 app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY, max_age=28800, https_only=False)
+
+os.makedirs("app/static", exist_ok=True)
+app.mount("/static", StaticFiles(directory="app/static"), name="static")
 
 templates = Jinja2Templates(directory="app/templates")
 
@@ -67,8 +71,6 @@ def login_page(request: Request):
     if request.session.get("user"):
         return RedirectResponse(url="/", status_code=302)
     return templates.TemplateResponse("login.html", {"request": request, "error": None})
-
-
 
 @app.post("/login", response_class=HTMLResponse)
 def login_submit(request: Request, username: str = Form(...), password: str = Form(...)):
@@ -209,7 +211,6 @@ def api_pricelist_prices(payload: PricelistComputeIn, user: dict = Depends(get_c
     allowed = validate_user_company(user, payload.company_id)
     items_list = [it.model_dump() for it in payload.items]
     try:
-        # 1. Intentar cálculo local instantáneo desde SQLite (listas + reglas + tipos de cambio descargados)
         local_prices = compute_prices_from_local_pricelist(
             company_id=payload.company_id,
             pricelist_id=payload.pricelist_id,
@@ -218,7 +219,6 @@ def api_pricelist_prices(payload: PricelistComputeIn, user: dict = Depends(get_c
         if local_prices is not None:
             return JSONResponse({"prices": local_prices, "source": "sqlite"})
 
-        # 2. Fallback directo a Odoo si aún no se ejecutó la sincronización de listas de precios
         fallback_prices = compute_pricelist_prices_odoo_fallback(
             company_id=payload.company_id,
             allowed_company_ids=allowed,

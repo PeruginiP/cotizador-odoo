@@ -4,32 +4,75 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Acceso - Cotizador Odoo</title>
+    <title>Acceso - Cotizador Argelec</title>
+    <link rel="icon" type="image/png" href="/static/isotipo-argelec.png">
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body {
+            background-color: #eef0f4;
+            color: #000000;
+        }
+
+        .login-card {
+            border: 1px solid #d8dadd;
+            border-top: 5px solid #2f3787;
+            border-radius: 6px;
+        }
+
+        .btn-argelec {
+            background-color: #5184af;
+            border-color: #5184af;
+            color: #ffffff;
+        }
+
+        .btn-argelec:hover,
+        .btn-argelec:focus {
+            background-color: #416e95;
+            border-color: #416e95;
+            color: #ffffff;
+        }
+
+        .text-brand-dark {
+            color: #2f3787;
+        }
+    </style>
 </head>
 
-<body class="bg-light d-flex align-items-center" style="min-height: 100vh;">
+<body class="d-flex align-items-center" style="min-height: 100vh;">
     <div class="container">
         <div class="row justify-content-center">
-            <div class="col-12 col-sm-8 col-md-5 col-lg-4">
-                <div class="card shadow-sm border-0">
+            <div class="col-12 col-sm-9 col-md-6 col-lg-4">
+                <div class="card shadow-sm login-card bg-white">
                     <div class="card-body p-4">
-                        <h4 class="mb-1 fw-bold text-primary">Cotizador Argelec</h4>
-                        <p class="text-muted small mb-4">Ingresá con tu usuario y contraseña de Odoo</p>
+                        <div class="text-center mb-3 pb-2 border-bottom">
+                            <img src="/static/logo-argelec.png" alt="Argelec Materiales Eléctricos"
+                                style="max-height: 62px; width: auto;" onerror="this.style.display='none'">
+                            <div class="fw-bold text-brand-dark mt-2" style="font-size: 1.05rem;">
+                                Cotizador Web Odoo
+                            </div>
+                        </div>
+
                         {% if error %}
                         <div class="alert alert-danger py-2 small">{{ error }}</div>
                         {% endif %}
+
                         <form method="post" action="/login">
                             <div class="mb-3">
-                                <label class="form-label small fw-semibold">Email / Usuario Odoo</label>
-                                <input type="text" name="username" class="form-control"
+                                <label class="form-label small fw-bold" style="color: #000000;">Email / Usuario
+                                    Odoo</label>
+                                <input type="text" name="username" class="form-control" style="color: #000000;"
                                     placeholder="usuario@argelec.com.ar" required autofocus>
                             </div>
                             <div class="mb-4">
-                                <label class="form-label small fw-semibold">Contraseña</label>
-                                <input type="password" name="password" class="form-control" required>
+                                <label class="form-label small fw-bold" style="color: #000000;">Contraseña o Clave
+                                    API</label>
+                                <input type="password" name="password" class="form-control" style="color: #000000;"
+                                    required>
+                                <div class="form-text small" style="color: #333333;">
+                                    Si tenés 2FA activo en Odoo, ingresá tu Clave API personal.
+                                </div>
                             </div>
-                            <button type="submit" class="btn btn-primary w-100 fw-semibold">Ingresar</button>
+                            <button type="submit" class="btn btn-argelec w-100 fw-bold py-2">Ingresar</button>
                         </form>
                     </div>
                 </div>
