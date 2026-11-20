@@ -1163,10 +1163,33 @@
             }
         }
 
+        function getItemNumberForIndex(targetIdx) {
+            let itemNum = 0;
+            for (let i = 0; i <= targetIdx && i < rows.length; i++) {
+                if (rows[i].row_type !== 'section') {
+                    itemNum++;
+                }
+            }
+            return itemNum || 1;
+        }
+
         function openProductModal(rowIdx) {
             activeRowIndex = rowIdx;
-            $('#modal-target-row').text(rowIdx + 1);
+            $('#modal-target-row').text(getItemNumberForIndex(rowIdx));
             clearModalSelection();
+
+            const targetRow = rows[rowIdx];
+            let initialQuery = '';
+            if (targetRow && targetRow.row_type === 'product' && targetRow.product_id !== null) {
+                initialQuery = (targetRow.default_code && targetRow.default_code !== 'S/C')
+                    ? targetRow.default_code
+                    : (targetRow.name || '');
+            }
+
+            if (modalTable) {
+                modalTable.search(initialQuery).draw();
+            }
+
             searchModal.show();
         }
 
@@ -1340,7 +1363,7 @@
 
             let headHtml = `
                 <tr>
-                    <th class="text-center" style="width: 68px;">Orden</th>
+                    <th class="text-center" style="width: 72px;">Orden</th>
                     <th style="width: 170px;">Producto</th>
                     <th style="min-width: 230px;">Detalle</th>
                     <th style="width: 120px;">Marca</th>
@@ -1361,13 +1384,21 @@
             $('#quote-grid-head').html(headHtml);
 
             const tbody = $('#quote-grid-body').empty();
-            let totalNet = 0;
+            let itemCounter = 0;
 
             rows.forEach((r, idx) => {
+                const isSection = r.row_type === 'section';
+                if (!isSection) {
+                    itemCounter++;
+                }
+                const orderBadge = isSection
+                    ? `<span class="text-muted me-1">—</span>`
+                    : `<span class="fw-bold me-1">${itemCounter}</span>`;
+
                 const orderCell = `
                     <td class="text-center text-nowrap">
                         <span class="drag-handle me-1" title="Arrastrar para reordenar">⠿</span>
-                        <span class="fw-bold me-1">${idx + 1}</span>
+                        ${orderBadge}
                         <button type="button" tabindex="-1" class="btn btn-link btn-sm p-0 text-dark text-decoration-none" onclick="moveRow(${idx}, -1)" title="Subir">↑</button>
                         <button type="button" tabindex="-1" class="btn btn-link btn-sm p-0 text-dark text-decoration-none" onclick="moveRow(${idx}, 1)" title="Bajar">↓</button>
                     </td>
@@ -1406,7 +1437,7 @@
                                     <span class="badge" style="background-color:#5184af; color:#ffffff;">NOTA</span>
                                     <input id="text-input-${idx}" tabindex="-1" type="text" class="form-control form-control-sm"
                                            value="${escapeHtml(r.name)}"
-                                           placeholder="Texto de la nota..."
+                                           placeholder="Texto de la nota (ej. Ítem no cotizado)..."
                                            oninput="updateGridFieldInPlace(${idx}, 'name', this.value)">
                                 </div>
                             </td>
@@ -1418,7 +1449,6 @@
 
                 const hasProd = r.product_id !== null;
                 const lineSubtotal = hasProd ? (r.qty * r.price_unit * (1 - (r.discount / 100))) : 0;
-                totalNet += lineSubtotal;
 
                 const prodDisplay = hasProd
                     ? `<div class="fw-bold text-brand-code">${escapeHtml(r.default_code)}</div>`
@@ -1496,7 +1526,6 @@
 
             recalculateAllTotalsInPlace();
         }
-
         function escapeHtml(text) {
             return String(text || '')
                 .replace(/&/g, '&amp;')
