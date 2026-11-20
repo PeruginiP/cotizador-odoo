@@ -317,6 +317,7 @@ def run_full_sync():
         del barcodes_map
         gc.collect()
 
+        report("Construyendo tablas staging e índices (sin bloquear catálogo)...")
         replace_all_catalog(
             product_rows=product_rows,
             warehouse_rows=warehouse_rows,

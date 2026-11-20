@@ -2,6 +2,7 @@ import sqlite3
 import os
 import json
 from datetime import datetime, date, timezone, timedelta
+
 try:
     from zoneinfo import ZoneInfo
     AR_TZ = ZoneInfo("America/Argentina/Buenos_Aires")
@@ -12,10 +13,13 @@ DB_PATH = os.getenv("DB_PATH", "/app/data/productos.db")
 
 def get_conn():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn = sqlite3.connect(DB_PATH, timeout=30.0, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA synchronous=NORMAL;")
+    conn.execute("PRAGMA busy_timeout=30000;")
+    conn.execute("PRAGMA temp_store=MEMORY;")
+    conn.execute("PRAGMA cache_size=-32000;")
     return conn
 
 def init_db():
@@ -51,10 +55,11 @@ def init_db():
         if "currency_id" not in cols:
             conn.execute("ALTER TABLE products ADD COLUMN currency_id INTEGER DEFAULT 0;")
 
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_prod_code ON products(default_code);")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_prod_name ON products(name);")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_prod_barcode ON products(barcode_ids);")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_prod_brand ON products(brand);")
+        if len(conn.execute("PRAGMA index_list(products)").fetchall()) == 0:
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_prod_code ON products(default_code);")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_prod_name ON products(name);")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_prod_barcode ON products(barcode_ids);")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_prod_brand ON products(brand);")
 
         conn.execute("""
             CREATE TABLE IF NOT EXISTS product_categories (
@@ -72,7 +77,8 @@ def init_db():
                 company_name TEXT
             )
         """)
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_wh_company ON warehouses(company_id);")
+        if len(conn.execute("PRAGMA index_list(warehouses)").fetchall()) == 0:
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_wh_company ON warehouses(company_id);")
 
         conn.execute("""
             CREATE TABLE IF NOT EXISTS product_stock (
@@ -82,7 +88,8 @@ def init_db():
                 PRIMARY KEY (product_id, warehouse_id)
             )
         """)
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_ps_wh_prod ON product_stock(warehouse_id, product_id, free_qty);")
+        if len(conn.execute("PRAGMA index_list(product_stock)").fetchall()) <= 1:
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_ps_wh_prod ON product_stock(warehouse_id, product_id, free_qty);")
 
         conn.execute("""
             CREATE TABLE IF NOT EXISTS company_currencies (
@@ -130,7 +137,8 @@ def init_db():
                 currency_id INTEGER DEFAULT 0
             )
         """)
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_pli_pricelist ON pricelist_items(pricelist_id);")
+        if len(conn.execute("PRAGMA index_list(pricelist_items)").fetchall()) == 0:
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_pli_pricelist ON pricelist_items(pricelist_id);")
 
         conn.execute("""
             CREATE TABLE IF NOT EXISTS sync_status (
@@ -173,58 +181,200 @@ def replace_all_catalog(
     pricelist_rows=None,
     pricelist_item_rows=None,
 ):
+    # Ordenar por clave primaria acelera la inserción B-tree en SQLite
+    product_rows.sort(key=lambda r: r[0])
+    stock_rows.sort(key=lambda r: (r[0], r[1]))
+
     conn = get_conn()
+    conn.isolation_level = None  # Control explícito de transacciones para swap atómico
     try:
-        with conn:
-            conn.execute("DELETE FROM warehouses")
+        # FASE 1: Volcar datos en tablas *_staging sin bloquear las tablas productivas
+        conn.execute("BEGIN;")
+        try:
+            conn.execute("DROP TABLE IF EXISTS warehouses_staging;")
+            conn.execute("""
+                CREATE TABLE warehouses_staging (
+                    id INTEGER PRIMARY KEY,
+                    name TEXT,
+                    code TEXT,
+                    company_id INTEGER,
+                    company_name TEXT
+                )
+            """)
             conn.executemany("""
-                INSERT INTO warehouses (id, name, code, company_id, company_name)
+                INSERT INTO warehouses_staging (id, name, code, company_id, company_name)
                 VALUES (?, ?, ?, ?, ?)
             """, warehouse_rows)
 
-            conn.execute("DELETE FROM products")
+            conn.execute("DROP TABLE IF EXISTS products_staging;")
+            conn.execute("""
+                CREATE TABLE products_staging (
+                    id INTEGER PRIMARY KEY,
+                    default_code TEXT,
+                    name TEXT,
+                    list_price REAL DEFAULT 0.0,
+                    standard_price REAL DEFAULT 0.0,
+                    product_tmpl_id INTEGER DEFAULT 0,
+                    categ_id INTEGER DEFAULT 0,
+                    currency_id INTEGER DEFAULT 0,
+                    taxes_json TEXT DEFAULT '{}',
+                    brand TEXT DEFAULT '',
+                    barcode_ids TEXT,
+                    estado TEXT
+                )
+            """)
             conn.executemany("""
-                INSERT INTO products (
+                INSERT INTO products_staging (
                     id, default_code, name, list_price, standard_price,
                     product_tmpl_id, categ_id, currency_id,
                     taxes_json, brand, barcode_ids, estado
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, product_rows)
 
-            conn.execute("DELETE FROM product_stock")
+            conn.execute("DROP TABLE IF EXISTS product_stock_staging;")
+            conn.execute("""
+                CREATE TABLE product_stock_staging (
+                    product_id INTEGER,
+                    warehouse_id INTEGER,
+                    free_qty REAL DEFAULT 0.0,
+                    PRIMARY KEY (product_id, warehouse_id)
+                )
+            """)
             conn.executemany("""
-                INSERT INTO product_stock (product_id, warehouse_id, free_qty)
+                INSERT INTO product_stock_staging (product_id, warehouse_id, free_qty)
                 VALUES (?, ?, ?)
             """, stock_rows)
 
             if category_rows is not None:
-                conn.execute("DELETE FROM product_categories")
-                conn.executemany("INSERT INTO product_categories (id, parent_path) VALUES (?, ?)", category_rows)
+                conn.execute("DROP TABLE IF EXISTS product_categories_staging;")
+                conn.execute("CREATE TABLE product_categories_staging (id INTEGER PRIMARY KEY, parent_path TEXT DEFAULT '')")
+                conn.executemany("INSERT INTO product_categories_staging (id, parent_path) VALUES (?, ?)", category_rows)
 
             if currency_rows is not None:
-                conn.execute("DELETE FROM company_currencies")
+                conn.execute("DROP TABLE IF EXISTS company_currencies_staging;")
+                conn.execute("""
+                    CREATE TABLE company_currencies_staging (
+                        company_id INTEGER,
+                        currency_id INTEGER,
+                        currency_name TEXT,
+                        currency_symbol TEXT,
+                        rate REAL DEFAULT 1.0,
+                        is_base INTEGER DEFAULT 0,
+                        PRIMARY KEY (company_id, currency_id)
+                    )
+                """)
                 conn.executemany("""
-                    INSERT INTO company_currencies (company_id, currency_id, currency_name, currency_symbol, rate, is_base)
+                    INSERT INTO company_currencies_staging (company_id, currency_id, currency_name, currency_symbol, rate, is_base)
                     VALUES (?, ?, ?, ?, ?, ?)
                 """, currency_rows)
 
             if pricelist_rows is not None:
-                conn.execute("DELETE FROM pricelists")
+                conn.execute("DROP TABLE IF EXISTS pricelists_staging;")
+                conn.execute("""
+                    CREATE TABLE pricelists_staging (
+                        id INTEGER PRIMARY KEY,
+                        name TEXT,
+                        currency_id INTEGER,
+                        company_id INTEGER DEFAULT 0,
+                        sequence INTEGER DEFAULT 10
+                    )
+                """)
                 conn.executemany("""
-                    INSERT INTO pricelists (id, name, currency_id, company_id, sequence)
+                    INSERT INTO pricelists_staging (id, name, currency_id, company_id, sequence)
                     VALUES (?, ?, ?, ?, ?)
                 """, pricelist_rows)
 
             if pricelist_item_rows is not None:
-                conn.execute("DELETE FROM pricelist_items")
+                conn.execute("DROP TABLE IF EXISTS pricelist_items_staging;")
+                conn.execute("""
+                    CREATE TABLE pricelist_items_staging (
+                        id INTEGER PRIMARY KEY,
+                        pricelist_id INTEGER,
+                        applied_on TEXT,
+                        categ_id INTEGER DEFAULT 0,
+                        product_tmpl_id INTEGER DEFAULT 0,
+                        product_id INTEGER DEFAULT 0,
+                        min_quantity REAL DEFAULT 0.0,
+                        date_start TEXT DEFAULT '',
+                        date_end TEXT DEFAULT '',
+                        compute_price TEXT DEFAULT 'fixed',
+                        fixed_price REAL DEFAULT 0.0,
+                        percent_price REAL DEFAULT 0.0,
+                        price_discount REAL DEFAULT 0.0,
+                        price_surcharge REAL DEFAULT 0.0,
+                        price_round REAL DEFAULT 0.0,
+                        price_min_margin REAL DEFAULT 0.0,
+                        price_max_margin REAL DEFAULT 0.0,
+                        base TEXT DEFAULT 'list_price',
+                        base_pricelist_id INTEGER DEFAULT 0,
+                        currency_id INTEGER DEFAULT 0
+                    )
+                """)
                 conn.executemany("""
-                    INSERT INTO pricelist_items (
+                    INSERT INTO pricelist_items_staging (
                         id, pricelist_id, applied_on, categ_id, product_tmpl_id, product_id,
                         min_quantity, date_start, date_end, compute_price, fixed_price,
                         percent_price, price_discount, price_surcharge, price_round,
                         price_min_margin, price_max_margin, base, base_pricelist_id, currency_id
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, pricelist_item_rows)
+
+            conn.execute("COMMIT;")
+        except Exception:
+            conn.execute("ROLLBACK;")
+            raise
+
+        # FASE 2: Construir índices en bloque sobre *_staging (las tablas en vivo siguen 100% libres)
+        conn.execute("BEGIN;")
+        try:
+            conn.execute("CREATE INDEX idx_prod_code_stg ON products_staging(default_code);")
+            conn.execute("CREATE INDEX idx_prod_name_stg ON products_staging(name);")
+            conn.execute("CREATE INDEX idx_prod_barcode_stg ON products_staging(barcode_ids);")
+            conn.execute("CREATE INDEX idx_prod_brand_stg ON products_staging(brand);")
+            conn.execute("CREATE INDEX idx_wh_company_stg ON warehouses_staging(company_id);")
+            conn.execute("CREATE INDEX idx_ps_wh_prod_stg ON product_stock_staging(warehouse_id, product_id, free_qty);")
+            if pricelist_item_rows is not None:
+                conn.execute("CREATE INDEX idx_pli_pricelist_stg ON pricelist_items_staging(pricelist_id);")
+            conn.execute("COMMIT;")
+        except Exception:
+            conn.execute("ROLLBACK;")
+            raise
+
+        # FASE 3: Intercambio atómico instantáneo (< 5 ms)
+        conn.execute("BEGIN IMMEDIATE;")
+        try:
+            conn.execute("DROP TABLE IF EXISTS warehouses;")
+            conn.execute("ALTER TABLE warehouses_staging RENAME TO warehouses;")
+
+            conn.execute("DROP TABLE IF EXISTS products;")
+            conn.execute("ALTER TABLE products_staging RENAME TO products;")
+
+            conn.execute("DROP TABLE IF EXISTS product_stock;")
+            conn.execute("ALTER TABLE product_stock_staging RENAME TO product_stock;")
+
+            if category_rows is not None:
+                conn.execute("DROP TABLE IF EXISTS product_categories;")
+                conn.execute("ALTER TABLE product_categories_staging RENAME TO product_categories;")
+
+            if currency_rows is not None:
+                conn.execute("DROP TABLE IF EXISTS company_currencies;")
+                conn.execute("ALTER TABLE company_currencies_staging RENAME TO company_currencies;")
+
+            if pricelist_rows is not None:
+                conn.execute("DROP TABLE IF EXISTS pricelists;")
+                conn.execute("ALTER TABLE pricelists_staging RENAME TO pricelists;")
+
+            if pricelist_item_rows is not None:
+                conn.execute("DROP TABLE IF EXISTS pricelist_items;")
+                conn.execute("ALTER TABLE pricelist_items_staging RENAME TO pricelist_items;")
+
+            conn.execute("COMMIT;")
+        except Exception:
+            conn.execute("ROLLBACK;")
+            raise
+
+        # Consolidar WAL de manera pasiva sin bloquear lectores
+        conn.execute("PRAGMA wal_checkpoint(PASSIVE);")
     finally:
         conn.close()
 
@@ -293,9 +443,6 @@ def get_local_pricelists_for_company(company_id: int):
         conn.close()
 
 def compute_prices_from_local_pricelist(company_id: int, pricelist_id: int, items: list):
-    """
-    Evalúa las reglas de lista de precios y conversión de moneda almacenadas en SQLite.
-    """
     if not items or not pricelist_id:
         return {}
 
@@ -306,7 +453,7 @@ def compute_prices_from_local_pricelist(company_id: int, pricelist_id: int, item
             (company_id,),
         ).fetchall()
         if not curr_rows:
-            return None  # Señal para usar fallback XML-RPC si aún no se sincronizaron monedas
+            return None
 
         rate_map = {int(c["currency_id"]): float(c["rate"] or 1.0) for c in curr_rows}
         base_curr_row = next((c for c in curr_rows if int(c["is_base"]) == 1), curr_rows[0])
@@ -344,7 +491,6 @@ def compute_prices_from_local_pricelist(company_id: int, pricelist_id: int, item
         for ir in all_items_rows:
             items_by_pl.setdefault(int(ir["pricelist_id"]), []).append(dict(ir))
 
-        # Ordenar reglas según precedencia nativa de Odoo: variante -> plantilla -> categoría -> global, mayor min_quantity, mayor id
         applied_order = {"0_product_variant": 0, "1_product": 1, "2_product_category": 2, "3_global": 3}
         for pl_id_k, rules in items_by_pl.items():
             rules.sort(key=lambda r: (
@@ -397,7 +543,6 @@ def compute_prices_from_local_pricelist(company_id: int, pricelist_id: int, item
             prod_src_curr = int(prod["currency_id"] or base_curr_id)
 
             if not matched_rule:
-                # Sin regla específica: convertir precio de lista base a la moneda de la lista de precios
                 return convert_amount(float(prod["list_price"] or 0.0), prod_src_curr, pl_currency_id)
 
             rule_curr_id = int(matched_rule["currency_id"] or pl_currency_id)
