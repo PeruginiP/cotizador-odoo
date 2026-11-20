@@ -13,6 +13,7 @@ from app.database import (
     init_db,
     query_products_datatables,
     get_sync_status,
+    update_sync_status,
     get_all_warehouses,
     get_products_by_ids,
     compute_prices_from_local_pricelist,
@@ -45,6 +46,8 @@ login_attempts = {}
 @app.on_event("startup")
 def startup_event():
     init_db()
+    if get_sync_status().get("status") == "running":
+        update_sync_status("idle", "Listo (contenedor reiniciado)")
 
 def get_current_user(request: Request):
     user = request.session.get("user")
@@ -65,6 +68,8 @@ def login_page(request: Request):
         return RedirectResponse(url="/", status_code=302)
     return templates.TemplateResponse("login.html", {"request": request, "error": None})
 
+
+
 @app.post("/login", response_class=HTMLResponse)
 def login_submit(request: Request, username: str = Form(...), password: str = Form(...)):
     client_ip = request.client.host if request.client else "unknown"
@@ -79,6 +84,7 @@ def login_submit(request: Request, username: str = Form(...), password: str = Fo
 
     odoo_user, error_msg = authenticate_odoo_user(username, password)
     if odoo_user:
+        odoo_user["is_env_admin"] = False
         login_attempts.pop(client_ip, None)
         request.session["user"] = odoo_user
         return RedirectResponse(url="/", status_code=302)
@@ -93,6 +99,7 @@ def login_submit(request: Request, username: str = Form(...), password: str = Fo
             "name": f"Admin ({username})",
             "login": username,
             "partner_id": None,
+            "is_env_admin": True,
             "allowed_companies": all_comps,
             "default_company_id": all_comps[0]["id"] if all_comps else 1,
         }
@@ -169,6 +176,8 @@ def api_sync_status(user: dict = Depends(get_current_user)):
 
 @app.post("/api/sync")
 def api_trigger_sync(user: dict = Depends(get_current_user)):
+    if not user.get("is_env_admin"):
+        raise HTTPException(status_code=403, detail="Solo el administrador puede ejecutar la sincronización manual.")
     current = get_sync_status()
     if current.get("status") == "running":
         return JSONResponse({"ok": False, "message": "Ya hay una sincronización en curso."})

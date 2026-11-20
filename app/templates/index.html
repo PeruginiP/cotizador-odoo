@@ -188,9 +188,11 @@
             </div>
             <div class="d-flex flex-wrap align-items-center gap-2 text-white small">
                 <span id="sync-badge" class="badge bg-info text-dark">Cargando estado...</span>
+                {% if user.is_env_admin %}
                 <button id="btn-sync" class="btn btn-outline-light btn-sm" onclick="triggerSync()">
                     Sincronizar Odoo
                 </button>
+                {% endif %}
                 <span class="text-light opacity-75">Operador: <strong>{{ user.name }}</strong></span>
                 <a href="/logout" class="btn btn-danger btn-sm">Salir</a>
             </div>
