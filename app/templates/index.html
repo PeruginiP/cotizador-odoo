@@ -51,16 +51,33 @@
         #modal-products-table tbody tr {
             cursor: pointer;
         }
+
+        .company-select-nav {
+            max-width: 280px;
+            font-weight: 600;
+        }
     </style>
 </head>
 
 <body>
     <!-- BARRA SUPERIOR -->
     <nav class="navbar navbar-dark bg-dark px-3 py-2 mb-3">
-        <div class="container-fluid d-flex flex-wrap justify-content-between gap-2">
-            <span class="navbar-brand fw-bold mb-0 h6">
-                Cotizador Odoo <span class="badge bg-success ms-1">Cía. 9</span>
-            </span>
+        <div class="container-fluid d-flex flex-wrap justify-content-between align-items-center gap-2">
+            <div class="d-flex flex-wrap align-items-center gap-2">
+                <span class="navbar-brand fw-bold mb-0 h6 me-1">Cotizador Odoo</span>
+                <div class="d-flex align-items-center gap-1">
+                    <span class="text-light small opacity-75">Empresa:</span>
+                    <select id="company-select"
+                        class="form-select form-select-sm bg-success text-white border-success company-select-nav"
+                        onchange="onCompanyChange()">
+                        {% for comp in user.allowed_companies %}
+                        <option value="{{ comp.id }}" {% if comp.id==user.default_company_id %}selected{% endif %}>
+                            {{ comp.name }}
+                        </option>
+                        {% endfor %}
+                    </select>
+                </div>
+            </div>
             <div class="d-flex flex-wrap align-items-center gap-2 text-white small">
                 <span id="sync-badge" class="badge bg-info text-dark">Cargando estado...</span>
                 <button id="btn-sync" class="btn btn-outline-light btn-sm" onclick="triggerSync()">
@@ -75,8 +92,10 @@
     <div class="container-fluid px-3 pb-4">
         <!-- CABECERA DE COTIZACIÓN -->
         <div class="card shadow-sm border-0 mb-3">
-            <div class="card-header bg-white fw-bold py-2">
-                Datos de Cabecera (Cotización Borrador - Cía. 9)
+            <div class="card-header bg-white fw-bold py-2 d-flex justify-content-between align-items-center">
+                <span>Datos de Cabecera (Cotización Borrador)</span>
+                <span id="header-company-label"
+                    class="badge bg-success-subtle text-success border border-success-subtle"></span>
             </div>
             <div class="card-body py-3">
                 <div class="row g-2">
@@ -133,22 +152,7 @@
             <div class="card-body p-2">
                 <div class="table-responsive">
                     <table class="table table-bordered table-sm mb-2">
-                        <thead class="table-light">
-                            <tr>
-                                <th class="text-center" style="width: 55px;">Fila</th>
-                                <th style="width: 180px;">Producto</th>
-                                <th style="min-width: 240px;">Detalle</th>
-                                <th style="width: 130px;">Marca</th>
-                                <th class="text-end" style="width: 85px;">Cantidad</th>
-                                <th class="text-end" style="width: 115px;">Precio</th>
-                                <th class="text-end" style="width: 75px;">Dto %</th>
-                                <th class="text-end" style="width: 120px;">Subtotal</th>
-                                <th class="text-end bg-info-subtle" style="width: 75px;">Alm 5</th>
-                                <th class="text-end bg-info-subtle" style="width: 75px;">Alm 6</th>
-                                <th class="text-end bg-info-subtle" style="width: 75px;">Alm 7</th>
-                                <th class="text-center" style="width: 40px;"></th>
-                            </tr>
-                        </thead>
+                        <thead id="quote-grid-head" class="table-light"></thead>
                         <tbody id="quote-grid-body"></tbody>
                     </table>
                 </div>
@@ -173,43 +177,45 @@
         </div>
     </div>
 
-    <!-- MODAL BUSCADOR DE PRODUCTOS (DATATABLES) -->
+    <!-- MODAL BUSCADOR DE PRODUCTOS (DATATABLES CON SELECCIÓN MÚLTIPLE) -->
     <div class="modal fade" id="productSearchModal" tabindex="-1" aria-hidden="true">
         <div class="modal-dialog modal-xl modal-fullscreen-md-down modal-dialog-scrollable">
             <div class="modal-content">
-                <div class="modal-header py-2 bg-dark text-white">
-                    <h6 class="modal-title fw-bold">
-                        Seleccionar Producto — Fila #<span id="modal-target-row">1</span>
+                <div class="modal-header py-2 bg-dark text-white d-flex flex-wrap gap-2">
+                    <h6 class="modal-title fw-bold mb-0">
+                        Seleccionar Productos — Fila #<span id="modal-target-row">1</span>
                     </h6>
-                    <div class="d-flex align-items-center gap-3 ms-auto me-3">
+                    <div class="d-flex align-items-center gap-3 ms-auto">
                         <div class="form-check form-switch mb-0">
                             <input class="form-check-input" type="checkbox" id="filter-stock"
                                 onchange="reloadModalTable()">
                             <label class="form-check-label small text-white" for="filter-stock">Solo con stock</label>
                         </div>
+                        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"
+                            aria-label="Cerrar"></button>
                     </div>
-                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"
-                        aria-label="Cerrar"></button>
                 </div>
                 <div class="modal-body p-2">
+                    <div
+                        class="alert alert-light border py-1 px-2 mb-2 small text-muted d-flex justify-content-between align-items-center">
+                        <span>Tildá uno o varios productos (podés realizar múltiples búsquedas seguidas) y presioná
+                            <strong>Insertar seleccionados</strong>, o hacé doble clic para insertar uno directo.</span>
+                        <button type="button" class="btn btn-link btn-sm p-0 text-decoration-none"
+                            onclick="clearModalSelection()">Limpiar selección</button>
+                    </div>
                     <div class="table-responsive">
-                        <table id="modal-products-table" class="table table-striped table-hover table-sm w-100">
-                            <thead class="table-light">
-                                <tr>
-                                    <th>Código</th>
-                                    <th>Producto</th>
-                                    <th>Marca</th>
-                                    <th class="text-end">Precio Lista</th>
-                                    <th>Impuestos</th>
-                                    <th>Cód. Barras</th>
-                                    <th>Estado</th>
-                                    <th class="text-end">Alm 5</th>
-                                    <th class="text-end">Alm 6</th>
-                                    <th class="text-end">Alm 7</th>
-                                    <th class="text-center">Elegir</th>
-                                </tr>
-                            </thead>
-                        </table>
+                        <table id="modal-products-table" class="table table-striped table-hover table-sm w-100"></table>
+                    </div>
+                </div>
+                <div class="modal-footer py-2 bg-light d-flex justify-content-between">
+                    <span id="modal-selected-summary" class="small fw-semibold text-primary">0 productos
+                        seleccionados</span>
+                    <div class="d-flex gap-2">
+                        <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancelar</button>
+                        <button type="button" id="btn-insert-selected" class="btn btn-success btn-sm fw-bold px-3"
+                            onclick="insertSelectedProducts()" disabled>
+                            Insertar seleccionados (0)
+                        </button>
                     </div>
                 </div>
             </div>
@@ -221,10 +227,12 @@
     <script src="https://cdn.datatables.net/1.13.8/js/jquery.dataTables.min.js"></script>
     <script src="https://cdn.datatables.net/1.13.8/js/dataTables.bootstrap5.min.js"></script>
     <script>
-        let modalTable;
+        let allWarehouses = {{ warehouses | tojson }};
+        let modalTable = null;
         let searchModal;
         let activeRowIndex = 0;
         let customerTimer = null;
+        let selectedProductsMap = new Map();
 
         let rows = [createEmptyRowObj()];
 
@@ -237,75 +245,201 @@
                 qty: 1,
                 price_unit: 0,
                 discount: 0,
-                tax_ids: [],
-                stock_5: null,
-                stock_6: null,
-                stock_7: null
+                stocks: null
             };
+        }
+
+        function getSelectedCompanyId() {
+            return parseInt($('#company-select').val());
+        }
+
+        function getSelectedCompanyName() {
+            return $('#company-select option:selected').text().trim();
+        }
+
+        function getCompanyWarehouses() {
+            const compId = getSelectedCompanyId();
+            return allWarehouses.filter(w => parseInt(w.company_id) === compId);
         }
 
         $(document).ready(function () {
             searchModal = new bootstrap.Modal(document.getElementById('productSearchModal'));
+
+            document.getElementById('productSearchModal').addEventListener('shown.bs.modal', function () {
+                const input = $('#modal-products-table_filter input');
+                input.focus().select();
+            });
+
+            updateCompanyHeaderBadge();
+            initModalDataTable();
+            renderGrid();
+            loadQuotationOptions();
+            checkSyncStatus();
+            setInterval(checkSyncStatus, 5000);
+        });
+
+        function updateCompanyHeaderBadge() {
+            $('#header-company-label').text(getSelectedCompanyName());
+        }
+
+        function onCompanyChange() {
+            updateCompanyHeaderBadge();
+            clearModalSelection();
+
+            // Limpiar cliente seleccionado al cambiar de empresa
+            $('#selected-partner-id').val('');
+            $('#customer-search').val('');
+            $('#customer-dropdown').addClass('d-none').empty();
+            $('#selected-customer-badge').addClass('d-none').text('');
+
+            loadQuotationOptions();
+            initModalDataTable();
+            renderGrid();
+        }
+
+        function initModalDataTable() {
+            if ($.fn.DataTable.isDataTable('#modal-products-table')) {
+                modalTable.destroy();
+                $('#modal-products-table').empty();
+            }
+
+            const compWarehouses = getCompanyWarehouses();
+
+            // Construir cabecera dinámica con código corto de cada almacén + Total
+            let theadHtml = `
+                <thead class="table-light">
+                    <tr>
+                        <th class="text-center" style="width: 32px;"></th>
+                        <th>Código</th>
+                        <th>Producto</th>
+                        <th>Marca</th>
+                        <th class="text-end">Precio Lista</th>
+                        <th>Impuestos</th>
+                        <th>Cód. Barras</th>
+                        <th>Estado</th>
+            `;
+            compWarehouses.forEach(wh => {
+                theadHtml += `<th class="text-end bg-info-subtle" title="${escapeHtml(wh.name)}">${escapeHtml(wh.code)}</th>`;
+            });
+            theadHtml += `
+                        <th class="text-end bg-primary-subtle">Total</th>
+                    </tr>
+                </thead>
+            `;
+            $('#modal-products-table').html(theadHtml);
+
+            const columnsConfig = [
+                {
+                    data: null,
+                    orderable: false,
+                    className: 'text-center',
+                    render: function (data, type, row) {
+                        const checked = selectedProductsMap.has(row.id) ? 'checked' : '';
+                        return `<input type="checkbox" class="form-check-input prod-select-chk" ${checked}>`;
+                    }
+                },
+                { data: 'default_code', className: 'fw-semibold text-nowrap' },
+                { data: 'name' },
+                { data: 'brand', className: 'small fw-semibold text-primary' },
+                {
+                    data: 'list_price',
+                    className: 'text-end text-nowrap',
+                    render: d => '$ ' + parseFloat(d || 0).toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+                },
+                { data: 'taxes_id', orderable: false, className: 'small' },
+                { data: 'barcode_ids', className: 'small text-muted' },
+                { data: 'estado', className: 'small' }
+            ];
+
+            compWarehouses.forEach(wh => {
+                const whKey = String(wh.id);
+                columnsConfig.push({
+                    data: null,
+                    className: 'text-end stock-badge',
+                    render: function (data, type, row) {
+                        const val = (row.stocks && row.stocks[whKey] !== undefined) ? row.stocks[whKey] : 0;
+                        return formatStock(val);
+                    }
+                });
+            });
+
+            columnsConfig.push({
+                data: 'total_stock',
+                className: 'text-end stock-badge fw-bold bg-light',
+                render: d => formatStock(d)
+            });
 
             modalTable = $('#modal-products-table').DataTable({
                 processing: true,
                 serverSide: true,
                 pageLength: 20,
                 lengthMenu: [20, 50, 100],
+                order: [[1, 'asc']],
                 ajax: {
                     url: '/api/products',
                     data: function (d) {
                         d.only_in_stock = $('#filter-stock').is(':checked');
+                        d.company_id = getSelectedCompanyId();
                     }
                 },
-                columns: [
-                    { data: 'default_code', className: 'fw-semibold text-nowrap' },
-                    { data: 'name' },
-                    { data: 'brand', className: 'small fw-semibold text-primary' },
-                    {
-                        data: 'list_price',
-                        className: 'text-end text-nowrap',
-                        render: d => '$ ' + parseFloat(d || 0).toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
-                    },
-                    { data: 'taxes_id', className: 'small' },
-                    { data: 'barcode_ids', className: 'small text-muted' },
-                    { data: 'estado', className: 'small' },
-                    { data: 'stock_5', className: 'text-end stock-badge', render: d => formatStock(d) },
-                    { data: 'stock_6', className: 'text-end stock-badge', render: d => formatStock(d) },
-                    { data: 'stock_7', className: 'text-end stock-badge', render: d => formatStock(d) },
-                    {
-                        data: null,
-                        orderable: false,
-                        className: 'text-center',
-                        render: function () {
-                            return `<button class="btn btn-primary btn-sm py-0 px-2">Elegir</button>`;
-                        }
+                columns: columnsConfig,
+                createdRow: function (rowEl, data) {
+                    if (selectedProductsMap.has(data.id)) {
+                        $(rowEl).addClass('table-primary');
                     }
-                ],
+                },
                 language: {
                     url: 'https://cdn.datatables.net/plug-ins/1.13.8/i18n/es-ES.json'
                 }
             });
 
-            // Selección al hacer clic en cualquier fila del modal DataTables
-            $('#modal-products-table tbody').on('click', 'tr', function () {
+            // Clic simple en la fila o checkbox: alterna selección múltiple
+            $('#modal-products-table tbody').off('click', 'tr').on('click', 'tr', function (e) {
                 const data = modalTable.row(this).data();
-                if (data) {
-                    selectProductForRow(data);
+                if (!data) return;
+
+                const chk = $(this).find('.prod-select-chk');
+                let willSelect;
+                if ($(e.target).is('.prod-select-chk')) {
+                    willSelect = chk.is(':checked');
+                } else {
+                    willSelect = !selectedProductsMap.has(data.id);
+                    chk.prop('checked', willSelect);
                 }
+
+                if (willSelect) {
+                    selectedProductsMap.set(data.id, data);
+                    $(this).addClass('table-primary');
+                } else {
+                    selectedProductsMap.delete(data.id);
+                    $(this).removeClass('table-primary');
+                }
+                updateSelectionCounter();
             });
 
-            // Al abrir el modal, enfocar directo en el input de búsqueda de DataTables
-            document.getElementById('productSearchModal').addEventListener('shown.bs.modal', function () {
-                const input = $('#modal-products-table_filter input');
-                input.focus().select();
+            // Doble clic: inserta ese producto directamente
+            $('#modal-products-table tbody').off('dblclick', 'tr').on('dblclick', 'tr', function () {
+                const data = modalTable.row(this).data();
+                if (!data) return;
+                selectedProductsMap.set(data.id, data);
+                insertSelectedProducts();
             });
+        }
 
-            renderGrid();
-            loadQuotationOptions();
-            checkSyncStatus();
-            setInterval(checkSyncStatus, 5000);
-        });
+        function updateSelectionCounter() {
+            const count = selectedProductsMap.size;
+            $('#modal-selected-summary').text(`${count} producto${count === 1 ? '' : 's'} seleccionado${count === 1 ? '' : 's'}`);
+            $('#btn-insert-selected')
+                .text(`Insertar seleccionados (${count})`)
+                .prop('disabled', count === 0);
+        }
+
+        function clearModalSelection() {
+            selectedProductsMap.clear();
+            $('#modal-products-table tbody tr').removeClass('table-primary');
+            $('#modal-products-table tbody .prod-select-chk').prop('checked', false);
+            updateSelectionCounter();
+        }
 
         function formatStock(val) {
             if (val === null || val === undefined) return '<span class="text-muted">-</span>';
@@ -315,39 +449,54 @@
         }
 
         function reloadModalTable() {
-            modalTable.ajax.reload();
+            if (modalTable) {
+                modalTable.ajax.reload();
+            }
         }
 
         function openProductModal(rowIdx) {
             activeRowIndex = rowIdx;
             $('#modal-target-row').text(rowIdx + 1);
+            clearModalSelection();
             searchModal.show();
         }
 
-        function selectProductForRow(p) {
-            rows[activeRowIndex] = {
-                product_id: p.id,
-                default_code: p.default_code || 'S/C',
-                name: p.name || '',
-                brand: p.brand || '-',
-                qty: rows[activeRowIndex].qty || 1,
-                price_unit: parseFloat(p.list_price || 0),
-                discount: rows[activeRowIndex].discount || 0,
-                tax_ids: p.tax_ids || [],
-                stock_5: p.stock_5,
-                stock_6: p.stock_6,
-                stock_7: p.stock_7
-            };
+        function insertSelectedProducts() {
+            const items = Array.from(selectedProductsMap.values());
+            if (!items.length) return;
 
-            // Si completó la última fila, agregamos automáticamente una nueva fila lista abajo
-            if (activeRowIndex === rows.length - 1) {
+            let targetIdx = activeRowIndex;
+            items.forEach((p, i) => {
+                const newRow = {
+                    product_id: p.id,
+                    default_code: p.default_code || 'S/C',
+                    name: p.name || '',
+                    brand: p.brand || '-',
+                    qty: (i === 0 && rows[targetIdx] && rows[targetIdx].qty) ? rows[targetIdx].qty : 1,
+                    price_unit: parseFloat(p.list_price || 0),
+                    discount: (i === 0 && rows[targetIdx] && rows[targetIdx].discount) ? rows[targetIdx].discount : 0,
+                    stocks: p.stocks || {}
+                };
+
+                if (targetIdx < rows.length && rows[targetIdx].product_id === null) {
+                    rows[targetIdx] = newRow;
+                } else if (i === 0 && targetIdx < rows.length) {
+                    rows[targetIdx] = newRow;
+                } else {
+                    rows.splice(targetIdx, 0, newRow);
+                }
+                targetIdx++;
+            });
+
+            // Garantizar siempre una fila vacía al final para seguir cargando
+            if (rows[rows.length - 1].product_id !== null) {
                 rows.push(createEmptyRowObj());
             }
 
+            clearModalSelection();
             searchModal.hide();
             renderGrid();
 
-            // Enfocar la celda Cantidad de la fila recién cargada
             setTimeout(() => {
                 $(`#qty-input-${activeRowIndex}`).focus().select();
             }, 150);
@@ -385,6 +534,30 @@
         }
 
         function renderGrid() {
+            const compWarehouses = getCompanyWarehouses();
+
+            // Cabecera dinámica de la grilla según almacenes de la empresa activa
+            let headHtml = `
+                <tr>
+                    <th class="text-center" style="width: 50px;">Fila</th>
+                    <th style="width: 170px;">Producto</th>
+                    <th style="min-width: 230px;">Detalle</th>
+                    <th style="width: 125px;">Marca</th>
+                    <th class="text-end" style="width: 80px;">Cantidad</th>
+                    <th class="text-end" style="width: 110px;">Precio</th>
+                    <th class="text-end" style="width: 70px;">Dto %</th>
+                    <th class="text-end" style="width: 115px;">Subtotal</th>
+            `;
+            compWarehouses.forEach(wh => {
+                headHtml += `<th class="text-end bg-info-subtle" style="width: 70px;" title="${escapeHtml(wh.name)}">${escapeHtml(wh.code)}</th>`;
+            });
+            headHtml += `
+                    <th class="text-end bg-primary-subtle" style="width: 75px;">Total</th>
+                    <th class="text-center" style="width: 38px;"></th>
+                </tr>
+            `;
+            $('#quote-grid-head').html(headHtml);
+
             const tbody = $('#quote-grid-body').empty();
             let totalNet = 0;
 
@@ -394,8 +567,25 @@
                 totalNet += lineSubtotal;
 
                 const prodDisplay = hasProd
-                    ? `<div class="fw-bold text-primary">${r.default_code}</div>`
+                    ? `<div class="fw-bold text-primary">${escapeHtml(r.default_code)}</div>`
                     : `<span class="text-muted small">Clic para buscar...</span>`;
+
+                let stockCellsHtml = '';
+                let rowTotalStock = 0;
+
+                compWarehouses.forEach(wh => {
+                    if (!hasProd) {
+                        stockCellsHtml += `<td class="text-end stock-badge bg-light">-</td>`;
+                    } else {
+                        const whVal = (r.stocks && r.stocks[String(wh.id)] !== undefined) ? parseFloat(r.stocks[String(wh.id)]) : 0;
+                        rowTotalStock += whVal;
+                        stockCellsHtml += `<td class="text-end stock-badge bg-light">${formatStock(whVal)}</td>`;
+                    }
+                });
+
+                const totalStockCellHtml = hasProd
+                    ? `<td class="text-end stock-badge fw-bold bg-primary-subtle">${formatStock(Math.round(rowTotalStock * 10000) / 10000)}</td>`
+                    : `<td class="text-end stock-badge bg-primary-subtle">-</td>`;
 
                 tbody.append(`
                     <tr>
@@ -436,9 +626,8 @@
                         <td class="text-end fw-bold text-nowrap">
                             $ ${lineSubtotal.toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                         </td>
-                        <td class="text-end stock-badge bg-light">${formatStock(r.stock_5)}</td>
-                        <td class="text-end stock-badge bg-light">${formatStock(r.stock_6)}</td>
-                        <td class="text-end stock-badge bg-light">${formatStock(r.stock_7)}</td>
+                        ${stockCellsHtml}
+                        ${totalStockCellHtml}
                         <td class="text-center">
                             <button class="btn btn-outline-danger btn-sm py-0 px-1" onclick="removeGridRow(${idx})" title="Quitar fila">×</button>
                         </td>
@@ -459,17 +648,21 @@
 
         // --- OPCIONES Y ESTADO SYNC ---
         function loadQuotationOptions() {
-            $.get('/api/quotation-options', function (res) {
+            const companyId = getSelectedCompanyId();
+            $('#order-type-select').html('<option value="">Cargando...</option>');
+            $('#route-select').html('<option value="">Cargando...</option>');
+
+            $.get('/api/quotation-options', { company_id: companyId }, function (res) {
                 const typeSel = $('#order-type-select').empty();
                 typeSel.append('<option value="">-- Por defecto --</option>');
                 (res.order_types || []).forEach(t => {
-                    typeSel.append(`<option value="${t.id}">${t.name}</option>`);
+                    typeSel.append(`<option value="${t.id}">${escapeHtml(t.name)}</option>`);
                 });
 
                 const routeSel = $('#route-select').empty();
                 routeSel.append('<option value="">-- Por defecto --</option>');
                 (res.routes || []).forEach(r => {
-                    routeSel.append(`<option value="${r.id}">${r.name}</option>`);
+                    routeSel.append(`<option value="${r.id}">${escapeHtml(r.name)}</option>`);
                 });
             }).fail(function () {
                 $('#order-type-select').html('<option value="">Error al cargar</option>');
@@ -492,6 +685,13 @@
                     badge.removeClass('bg-warning bg-danger').addClass('bg-info text-dark')
                         .text(`${res.total_products.toLocaleString('es-AR')} productos${last}`);
                     btn.prop('disabled', false);
+                    if (allWarehouses.length === 0 && res.total_products > 0) {
+                        $.get('/api/warehouses', function (whs) {
+                            allWarehouses = whs;
+                            initModalDataTable();
+                            renderGrid();
+                        });
+                    }
                 }
             });
         }
@@ -511,7 +711,7 @@
                 return;
             }
             customerTimer = setTimeout(() => {
-                $.get('/api/customers', { q }, function (list) {
+                $.get('/api/customers', { q, company_id: getSelectedCompanyId() }, function (list) {
                     const dd = $('#customer-dropdown').empty();
                     if (!list.length) {
                         dd.append('<div class="list-group-item small text-muted">Sin resultados</div>').removeClass('d-none');
@@ -538,6 +738,7 @@
 
         // --- ENVÍO A ODOO ---
         function submitQuotation() {
+            const companyId = getSelectedCompanyId();
             const partnerId = $('#selected-partner-id').val();
             const customerName = $('#selected-customer-badge').text().replace('Cliente: ', '');
             const typeVal = $('#order-type-select').val();
@@ -565,6 +766,7 @@
                 method: 'POST',
                 contentType: 'application/json',
                 data: JSON.stringify({
+                    company_id: companyId,
                     partner_id: parseInt(partnerId),
                     customer_name: customerName,
                     type_id: typeVal ? parseInt(typeVal) : null,
@@ -575,7 +777,8 @@
                 }),
                 success: function (res) {
                     alertBox.removeClass('d-none alert-danger').addClass('alert-success').html(
-                        `Cotización <strong>${res.order_name}</strong> creada en borrador (Total c/imp: $ ${res.amount_total.toLocaleString('es-AR', { minimumFractionDigits: 2 })}). ` +
+                        `Cotización <strong>${res.order_name}</strong> creada en borrador en <strong>${escapeHtml(getSelectedCompanyName())}</strong> ` +
+                        `(Total c/imp: $ ${res.amount_total.toLocaleString('es-AR', { minimumFractionDigits: 2 })}). ` +
                         `<a href="${res.odoo_link}" target="_blank" class="fw-bold">Abrir en Odoo →</a>`
                     );
                     rows = [createEmptyRowObj()];

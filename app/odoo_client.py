@@ -1,10 +1,7 @@
 import xmlrpc.client
 import os
 
-COMPANY_ID = 9
-ALLOWED_COMPANIES = [9, 1]
-
-def _get_odoo_connection():
+def _get_odoo_service_connection():
     url = os.getenv("ODOO_URL", "").rstrip("/")
     db = os.getenv("ODOO_DB", "odoo")
     username = os.getenv("ODOO_USER", "")
@@ -15,13 +12,21 @@ def _get_odoo_connection():
     if not uid:
         raise ConnectionError("No se pudo autenticar el servicio contra Odoo.")
     models = xmlrpc.client.ServerProxy(f"{url}/xmlrpc/2/object", allow_none=True)
-    ctx = {"allowed_company_ids": ALLOWED_COMPANIES, "company_id": COMPANY_ID}
-    return url, db, uid, password, models, ctx
+    return url, db, uid, password, models
+
+def get_all_companies():
+    _, db, svc_uid, svc_pass, models = _get_odoo_service_connection()
+    companies = models.execute_kw(
+        db, svc_uid, svc_pass,
+        "res.company", "search_read",
+        [[]],
+        {"fields": ["id", "name"], "order": "id asc"},
+    )
+    return [{"id": int(c["id"]), "name": c["name"]} for c in companies]
 
 def authenticate_odoo_user(login: str, password: str):
     """
-    Valida usuario y contraseña directamente contra Odoo.
-    Verifica que sea usuario interno activo con acceso a Compañía 9.
+    Valida usuario y contraseña directamente contra Odoo y obtiene sus compañías permitidas.
     """
     url = os.getenv("ODOO_URL", "").rstrip("/")
     db = os.getenv("ODOO_DB", "odoo")
@@ -31,13 +36,12 @@ def authenticate_odoo_user(login: str, password: str):
     if not user_uid:
         return None, "Usuario o contraseña de Odoo incorrectos."
 
-    # Leemos los datos y permisos del usuario usando la conexión de servicio
-    _, _, svc_uid, svc_pass, models, _ = _get_odoo_connection()
+    _, _, svc_uid, svc_pass, models = _get_odoo_service_connection()
     users = models.execute_kw(
         db, svc_uid, svc_pass,
         "res.users", "read",
         [[user_uid]],
-        {"fields": ["id", "name", "login", "partner_id", "company_ids", "groups_id", "share", "active"]},
+        {"fields": ["id", "name", "login", "partner_id", "company_id", "company_ids", "groups_id", "share", "active"]},
     )
     if not users:
         return None, "No se encontró el perfil del usuario en Odoo."
@@ -46,10 +50,10 @@ def authenticate_odoo_user(login: str, password: str):
     if not u.get("active") or u.get("share"):
         return None, "El usuario no es un usuario interno activo de Odoo."
 
-    if COMPANY_ID not in (u.get("company_ids") or []):
-        return None, f"El usuario no tiene permisos habilitados para la Compañía {COMPANY_ID}."
+    allowed_ids = [int(cid) for cid in (u.get("company_ids") or [])]
+    if not allowed_ids:
+        return None, "El usuario no tiene compañías habilitadas en Odoo."
 
-    # Filtro opcional por grupo de seguridad de Odoo (ej. ALLOWED_ODOO_GROUP="Cotizador Web")
     required_group = os.getenv("ALLOWED_ODOO_GROUP", "").strip()
     if required_group:
         user_groups = models.execute_kw(
@@ -67,16 +71,35 @@ def authenticate_odoo_user(login: str, password: str):
         if not matched:
             return None, f"El usuario no pertenece al grupo habilitado ({required_group})."
 
+    companies_records = models.execute_kw(
+        db, svc_uid, svc_pass,
+        "res.company", "read",
+        [allowed_ids],
+        {"fields": ["id", "name"]},
+    )
+    allowed_companies = sorted(
+        [{"id": int(c["id"]), "name": c["name"]} for c in companies_records],
+        key=lambda x: x["name"],
+    )
+
+    default_comp_info = u.get("company_id")
+    default_comp_id = int(default_comp_info[0]) if isinstance(default_comp_info, list) else allowed_companies[0]["id"]
+    if default_comp_id not in allowed_ids:
+        default_comp_id = allowed_companies[0]["id"]
+
     partner_info = u.get("partner_id")
     return {
-        "uid": u["id"],
+        "uid": int(u["id"]),
         "name": u["name"],
         "login": u["login"],
-        "partner_id": partner_info[0] if isinstance(partner_info, list) else None,
+        "partner_id": int(partner_info[0]) if isinstance(partner_info, list) else None,
+        "allowed_companies": allowed_companies,
+        "default_company_id": default_comp_id,
     }, None
 
-def get_quotation_options():
-    _, db, uid, password, models, ctx = _get_odoo_connection()
+def get_quotation_options(company_id: int, allowed_company_ids: list):
+    _, db, uid, password, models = _get_odoo_service_connection()
+    ctx = {"allowed_company_ids": allowed_company_ids, "company_id": int(company_id)}
 
     so_fields = models.execute_kw(
         db, uid, password,
@@ -97,7 +120,7 @@ def get_quotation_options():
         order_types = models.execute_kw(
             db, uid, password,
             type_model, "search_read",
-            [["|", ("company_id", "=", False), ("company_id", "=", COMPANY_ID)]],
+            [["|", ("company_id", "=", False), ("company_id", "=", int(company_id))]],
             {"fields": ["id", "name"], "order": "sequence asc, id asc", "context": ctx},
         )
 
@@ -112,17 +135,18 @@ def get_quotation_options():
             route_model, "search_read",
             [[
                 ("sale_selectable", "=", True),
-                "|", ("company_id", "=", False), ("company_id", "=", COMPANY_ID),
+                "|", ("company_id", "=", False), ("company_id", "=", int(company_id)),
             ]],
             {"fields": ["id", "name"], "order": "sequence asc, id asc", "context": ctx},
         )
 
     return {"order_types": order_types, "routes": routes}
 
-def search_customers(query: str, limit: int = 15):
-    _, db, uid, password, models, ctx = _get_odoo_connection()
+def search_customers(query: str, company_id: int, allowed_company_ids: list, limit: int = 15):
+    _, db, uid, password, models = _get_odoo_service_connection()
+    ctx = {"allowed_company_ids": allowed_company_ids, "company_id": int(company_id)}
     domain = [
-        "|", ("company_id", "=", False), ("company_id", "=", COMPANY_ID),
+        "|", ("company_id", "=", False), ("company_id", "=", int(company_id)),
         "|", "|", ("name", "ilike", query), ("vat", "ilike", query), ("email", "ilike", query),
     ]
     partners = models.execute_kw(
@@ -138,6 +162,8 @@ def search_customers(query: str, limit: int = 15):
     return partners
 
 def create_draft_quotation(
+    company_id: int,
+    allowed_company_ids: list,
     partner_id: int,
     lines: list,
     creator_user: dict,
@@ -146,7 +172,8 @@ def create_draft_quotation(
     purchase_order_number: str = "",
     client_order_ref: str = "",
 ):
-    url, db, uid, password, models, ctx = _get_odoo_connection()
+    url, db, uid, password, models = _get_odoo_service_connection()
+    ctx = {"allowed_company_ids": allowed_company_ids, "company_id": int(company_id)}
 
     so_fields = models.execute_kw(
         db, uid, password,
@@ -180,7 +207,7 @@ def create_draft_quotation(
     # NO enviamos user_id para respetar el vendedor asignado en la ficha del cliente
     order_vals = {
         "partner_id": int(partner_id),
-        "company_id": COMPANY_ID,
+        "company_id": int(company_id),
         "state": "draft",
         "order_line": order_lines,
     }

@@ -22,25 +22,43 @@ def init_db():
                 default_code TEXT,
                 name TEXT,
                 list_price REAL DEFAULT 0.0,
-                taxes_id TEXT,
-                tax_ids_json TEXT,
+                taxes_json TEXT DEFAULT '{}',
                 brand TEXT DEFAULT '',
                 barcode_ids TEXT,
-                estado TEXT,
-                stock_5 REAL DEFAULT 0.0,
-                stock_6 REAL DEFAULT 0.0,
-                stock_7 REAL DEFAULT 0.0
+                estado TEXT
             )
         """)
-        # Migración automática si la tabla venía con la estructura anterior
         cols = [r["name"] for r in conn.execute("PRAGMA table_info(products)").fetchall()]
         if "brand" not in cols:
             conn.execute("ALTER TABLE products ADD COLUMN brand TEXT DEFAULT '';")
+        if "taxes_json" not in cols:
+            conn.execute("ALTER TABLE products ADD COLUMN taxes_json TEXT DEFAULT '{}';")
 
         conn.execute("CREATE INDEX IF NOT EXISTS idx_prod_code ON products(default_code);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_prod_name ON products(name);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_prod_barcode ON products(barcode_ids);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_prod_brand ON products(brand);")
+
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS warehouses (
+                id INTEGER PRIMARY KEY,
+                name TEXT,
+                code TEXT,
+                company_id INTEGER,
+                company_name TEXT
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_wh_company ON warehouses(company_id);")
+
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS product_stock (
+                product_id INTEGER,
+                warehouse_id INTEGER,
+                free_qty REAL DEFAULT 0.0,
+                PRIMARY KEY (product_id, warehouse_id)
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_ps_wh_prod ON product_stock(warehouse_id, product_id, free_qty);")
 
         conn.execute("""
             CREATE TABLE IF NOT EXISTS sync_status (
@@ -61,27 +79,52 @@ def init_db():
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 created_at TEXT,
                 username TEXT,
+                company_id INTEGER,
                 odoo_order_id INTEGER,
                 odoo_order_name TEXT,
                 customer_name TEXT,
-                warehouse_id INTEGER,
                 items_count INTEGER,
                 amount_total REAL
             )
         """)
+        log_cols = [r["name"] for r in conn.execute("PRAGMA table_info(quotation_logs)").fetchall()]
+        if "company_id" not in log_cols:
+            conn.execute("ALTER TABLE quotation_logs ADD COLUMN company_id INTEGER DEFAULT 0;")
     conn.close()
 
-def replace_all_products(rows):
+def replace_all_catalog(product_rows, warehouse_rows, stock_rows):
     conn = get_conn()
     try:
         with conn:
+            conn.execute("DELETE FROM warehouses")
+            conn.executemany("""
+                INSERT INTO warehouses (id, name, code, company_id, company_name)
+                VALUES (?, ?, ?, ?, ?)
+            """, warehouse_rows)
+
             conn.execute("DELETE FROM products")
             conn.executemany("""
                 INSERT INTO products (
-                    id, default_code, name, list_price, taxes_id, tax_ids_json,
-                    brand, barcode_ids, estado, stock_5, stock_6, stock_7
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, rows)
+                    id, default_code, name, list_price, taxes_json,
+                    brand, barcode_ids, estado
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, product_rows)
+
+            conn.execute("DELETE FROM product_stock")
+            conn.executemany("""
+                INSERT INTO product_stock (product_id, warehouse_id, free_qty)
+                VALUES (?, ?, ?)
+            """, stock_rows)
+    finally:
+        conn.close()
+
+def get_all_warehouses():
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT id, name, code, company_id, company_name FROM warehouses ORDER BY company_id ASC, code ASC, id ASC"
+        ).fetchall()
+        return [dict(r) for r in rows]
     finally:
         conn.close()
 
@@ -113,31 +156,68 @@ def get_sync_status():
     finally:
         conn.close()
 
-def query_products_datatables(start: int, length: int, search_value: str, order_col_idx: int, order_dir: str, only_in_stock: bool = False):
-    columns_map = {
-        0: "default_code",
-        1: "name",
-        2: "brand",
-        3: "list_price",
-        4: "taxes_id",
-        5: "barcode_ids",
-        6: "estado",
-        7: "stock_5",
-        8: "stock_6",
-        9: "stock_7",
-    }
-    order_col = columns_map.get(order_col_idx, "default_code")
-    direction = "DESC" if order_dir.lower() == "desc" else "ASC"
-
+def query_products_datatables(
+    start: int,
+    length: int,
+    search_value: str,
+    order_col_idx: int,
+    order_dir: str,
+    company_id: int,
+    only_in_stock: bool = False,
+):
     conn = get_conn()
     try:
+        wh_rows = conn.execute(
+            "SELECT id, code, name FROM warehouses WHERE company_id = ? ORDER BY code ASC, id ASC",
+            (company_id,),
+        ).fetchall()
+        company_wh_ids = [int(w["id"]) for w in wh_rows]
+
+        # Mapeo de columnas de DataTables:
+        # 0: checkbox, 1: default_code, 2: name, 3: brand, 4: list_price,
+        # 5: taxes_id, 6: barcode_ids, 7: estado,
+        # 8 .. 8+N-1: almacenes de la compañía, 8+N: total stock de la compañía
+        fixed_cols = {
+            1: "default_code",
+            2: "name",
+            3: "brand",
+            4: "list_price",
+            6: "barcode_ids",
+            7: "estado",
+        }
+        direction = "DESC" if order_dir.lower() == "desc" else "ASC"
+
+        if order_col_idx in fixed_cols:
+            order_expr = f"{fixed_cols[order_col_idx]} {direction}"
+        elif 8 <= order_col_idx < 8 + len(company_wh_ids):
+            target_wh_id = company_wh_ids[order_col_idx - 8]
+            order_expr = (
+                f"(SELECT COALESCE(free_qty, 0) FROM product_stock ps "
+                f"WHERE ps.product_id = products.id AND ps.warehouse_id = {target_wh_id}) {direction}"
+            )
+        elif order_col_idx == 8 + len(company_wh_ids) and company_wh_ids:
+            wh_list_sql = ",".join(str(wid) for wid in company_wh_ids)
+            order_expr = (
+                f"(SELECT COALESCE(SUM(free_qty), 0) FROM product_stock ps "
+                f"WHERE ps.product_id = products.id AND ps.warehouse_id IN ({wh_list_sql})) {direction}"
+            )
+        else:
+            order_expr = f"default_code {direction}"
+
         total_records = conn.execute("SELECT COUNT(*) FROM products").fetchone()[0]
 
         where_clauses = []
         params = []
 
         if only_in_stock:
-            where_clauses.append("(stock_5 > 0 OR stock_6 > 0 OR stock_7 > 0)")
+            if company_wh_ids:
+                wh_list_sql = ",".join(str(wid) for wid in company_wh_ids)
+                where_clauses.append(
+                    f"EXISTS (SELECT 1 FROM product_stock ps WHERE ps.product_id = products.id "
+                    f"AND ps.warehouse_id IN ({wh_list_sql}) AND ps.free_qty > 0)"
+                )
+            else:
+                where_clauses.append("1 = 0")
 
         if search_value and search_value.strip():
             terms = search_value.strip().split()
@@ -155,20 +235,45 @@ def query_products_datatables(start: int, length: int, search_value: str, order_
         ).fetchone()[0]
 
         query_sql = f"""
-            SELECT id, default_code, name, list_price, taxes_id, tax_ids_json,
-                   brand, barcode_ids, estado, stock_5, stock_6, stock_7
+            SELECT id, default_code, name, list_price, taxes_json, brand, barcode_ids, estado
             FROM products
             {where_sql}
-            ORDER BY {order_col} {direction}
+            ORDER BY {order_expr}
             LIMIT ? OFFSET ?
         """
         rows = conn.execute(query_sql, params + [length, start]).fetchall()
 
+        prod_ids = [int(r["id"]) for r in rows]
+        stock_by_prod = {}
+        if prod_ids:
+            placeholders = ",".join("?" for _ in prod_ids)
+            st_rows = conn.execute(
+                f"SELECT product_id, warehouse_id, free_qty FROM product_stock WHERE product_id IN ({placeholders})",
+                prod_ids,
+            ).fetchall()
+            for sr in st_rows:
+                stock_by_prod.setdefault(int(sr["product_id"]), {})[str(sr["warehouse_id"])] = float(sr["free_qty"])
+
+        comp_key = str(company_id)
         data = []
         for r in rows:
-            item = dict(r)
-            item["tax_ids"] = json.loads(item["tax_ids_json"] or "[]")
-            data.append(item)
+            pid = int(r["id"])
+            taxes_map = json.loads(r["taxes_json"] or "{}")
+            p_stocks = stock_by_prod.get(pid, {})
+            total_company_stock = round(sum(p_stocks.get(str(wid), 0.0) for wid in company_wh_ids), 4)
+
+            data.append({
+                "id": pid,
+                "default_code": r["default_code"] or "",
+                "name": r["name"] or "",
+                "list_price": float(r["list_price"] or 0.0),
+                "taxes_id": taxes_map.get(comp_key, ""),
+                "brand": r["brand"] or "",
+                "barcode_ids": r["barcode_ids"] or "",
+                "estado": r["estado"] or "",
+                "stocks": p_stocks,
+                "total_stock": total_company_stock,
+            })
 
         return {
             "recordsTotal": total_records,
@@ -178,19 +283,19 @@ def query_products_datatables(start: int, length: int, search_value: str, order_
     finally:
         conn.close()
 
-def log_quotation(username, order_id, order_name, customer_name, warehouse_id, items_count, amount_total):
+def log_quotation(username, company_id, order_id, order_name, customer_name, items_count, amount_total):
     conn = get_conn()
     try:
         with conn:
             conn.execute("""
                 INSERT INTO quotation_logs (
-                    created_at, username, odoo_order_id, odoo_order_name,
-                    customer_name, warehouse_id, items_count, amount_total
+                    created_at, username, company_id, odoo_order_id, odoo_order_name,
+                    customer_name, items_count, amount_total
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                username, order_id, order_name, customer_name,
-                warehouse_id, items_count, amount_total
+                username, company_id, order_id, order_name, customer_name,
+                items_count, amount_total
             ))
     finally:
         conn.close()

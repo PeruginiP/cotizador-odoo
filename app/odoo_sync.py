@@ -5,10 +5,8 @@ import json
 import threading
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from app.database import replace_all_products, update_sync_status
+from app.database import replace_all_catalog, update_sync_status
 
-ALMACENES_IDS = [5, 6, 7]
-COMPANIA_IMPUESTOS_ID = 1
 BATCH_SIZE = 2500
 MAX_WORKERS = 4
 
@@ -37,6 +35,12 @@ def run_full_sync():
         def execute_kw(model, method, args, kwargs=None):
             return get_models().execute_kw(db, uid, password, model, method, args, kwargs or {})
 
+        # 0. Obtener todas las compañías para operar en modo multi-empresa
+        companies = execute_kw("res.company", "search_read", [[]], {"fields": ["id", "name"]})
+        all_company_ids = [c["id"] for c in companies]
+        company_name_map = {c["id"]: c["name"] for c in companies}
+        multi_ctx = {"allowed_company_ids": all_company_ids}
+
         def leer_en_paralelo(model, ids, fields, batch_size=BATCH_SIZE):
             if not ids:
                 return []
@@ -44,21 +48,25 @@ def run_full_sync():
             resultados = []
             with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
                 futures = [
-                    executor.submit(execute_kw, model, "read", [b], {"fields": fields})
+                    executor.submit(execute_kw, model, "read", [b], {"fields": fields, "context": multi_ctx})
                     for b in batches
                 ]
                 for future in as_completed(futures):
                     resultados.extend(future.result())
             return resultados
 
-        # 1. Metadatos (incluyendo detección automática del campo de Marca)
-        update_sync_status("running", "Leyendo metadatos y ubicaciones de almacenes...")
+        # 1. Metadatos de producto y todos los almacenes de todas las compañías
+        update_sync_status("running", "Leyendo compañías, almacenes y metadatos...")
         studio_field = "x_studio_selection_field_6ua_1j8tii7sp"
-        all_prod_fields = execute_kw("product.product", "fields_get", [[]], {"attributes": ["type", "relation", "selection"]})
+        all_prod_fields = execute_kw(
+            "product.product",
+            "fields_get",
+            [[]],
+            {"attributes": ["type", "relation", "selection"], "context": multi_ctx},
+        )
 
         estado_selection_map = dict(all_prod_fields.get(studio_field, {}).get("selection", []))
 
-        # Detectar campo de marca (product_brand_id, brand_id, o campo con 'brand'/'marca')
         brand_field = None
         for candidate in ["product_brand_id", "brand_id", "x_studio_marca", "x_studio_brand_id"]:
             if candidate in all_prod_fields:
@@ -80,16 +88,30 @@ def run_full_sync():
         almacenes_info = execute_kw(
             "stock.warehouse",
             "search_read",
-            [[["id", "in", ALMACENES_IDS]]],
-            {"fields": ["id", "lot_stock_id"]},
+            [[]],
+            {"fields": ["id", "name", "code", "company_id", "lot_stock_id"], "context": multi_ctx},
         )
 
-        # 2. Stock en lot_stock_id por almacén
-        update_sync_status("running", "Calculando stock disponible sin reservar (Alm. 5, 6 y 7)...")
-        stock_por_almacen = {wh_id: {} for wh_id in ALMACENES_IDS}
+        # 2. Stock disponible sin reservar (lot_stock_id) en TODOS los almacenes
+        update_sync_status("running", f"Calculando stock en {len(almacenes_info)} almacenes...")
+        warehouse_rows = []
+        stock_rows = []
+
         for wh in almacenes_info:
             wh_id = wh["id"]
-            lot_stock_id = wh["lot_stock_id"][0]
+            wh_code = wh.get("code") or f"ALM-{wh_id}"
+            wh_name = wh.get("name") or wh_code
+            comp_info = wh.get("company_id")
+            comp_id = comp_info[0] if isinstance(comp_info, list) else 0
+            comp_name = company_name_map.get(comp_id, comp_info[1] if isinstance(comp_info, list) else "")
+
+            warehouse_rows.append((wh_id, wh_name, wh_code, comp_id, comp_name))
+
+            lot_stock = wh.get("lot_stock_id")
+            if not lot_stock:
+                continue
+            lot_stock_id = lot_stock[0]
+
             quants_grouped = execute_kw(
                 "stock.quant",
                 "read_group",
@@ -98,16 +120,17 @@ def run_full_sync():
                     ["product_id", "quantity:sum", "reserved_quantity:sum"],
                     ["product_id"],
                 ],
-                {"lazy": False},
+                {"lazy": False, "context": multi_ctx},
             )
             for g in quants_grouped:
                 if g.get("product_id"):
-                    prod_id = g["product_id"][0]
-                    free_qty = round(g.get("quantity", 0.0) - g.get("reserved_quantity", 0.0), 4)
-                    stock_por_almacen[wh_id][prod_id] = free_qty
+                    prod_id = int(g["product_id"][0])
+                    free_qty = round(float(g.get("quantity", 0.0)) - float(g.get("reserved_quantity", 0.0)), 4)
+                    if free_qty != 0.0:
+                        stock_rows.append((prod_id, wh_id, free_qty))
 
         # 3. Productos en paralelo
-        product_ids = execute_kw("product.product", "search", [[]])
+        product_ids = execute_kw("product.product", "search", [[]], {"context": multi_ctx})
         update_sync_status("running", f"Descargando {len(product_ids):,} productos en paralelo...")
 
         campos_lectura = [
@@ -123,15 +146,15 @@ def run_full_sync():
 
         productos_raw = leer_en_paralelo("product.product", product_ids, campos_lectura)
 
-        # 4. Relaciones (impuestos Cía 1 y códigos de barra)
-        update_sync_status("running", "Resolviendo impuestos y códigos de barra...")
+        # 4. Impuestos por compañía y códigos de barra
+        update_sync_status("running", "Resolviendo impuestos por compañía y códigos de barra...")
         all_tax_ids = list({tid for p in productos_raw for tid in p.get("taxes_id", [])})
         taxes_records = leer_en_paralelo("account.tax", all_tax_ids, ["name", "company_id"], batch_size=5000)
-        taxes_map = {
-            t["id"]: t["name"]
-            for t in taxes_records
-            if t.get("company_id") and t["company_id"][0] == COMPANIA_IMPUESTOS_ID
-        }
+        taxes_info_map = {}
+        for t in taxes_records:
+            c_info = t.get("company_id")
+            if c_info:
+                taxes_info_map[t["id"]] = (str(c_info[0]), t["name"])
 
         all_barcode_ids = list({bid for p in productos_raw for bid in p.get("barcode_ids", [])})
         barcodes_map = {}
@@ -141,9 +164,9 @@ def run_full_sync():
 
         # 5. Guardar en SQLite
         update_sync_status("running", "Guardando índice en base de datos local...")
-        rows_to_insert = []
+        product_rows = []
         for p in productos_raw:
-            pid = p["id"]
+            pid = int(p["id"])
             marca = ""
             if brand_field:
                 b_val = p.get(brand_field)
@@ -152,36 +175,37 @@ def run_full_sync():
                 elif isinstance(b_val, str):
                     marca = b_val
 
-            valid_tax_ids = [tid for tid in p.get("taxes_id", []) if tid in taxes_map]
-            impuestos = ", ".join(taxes_map[tid] for tid in valid_tax_ids)
+            taxes_by_comp = {}
+            for tid in p.get("taxes_id", []):
+                if tid in taxes_info_map:
+                    c_str, t_name = taxes_info_map[tid]
+                    taxes_by_comp.setdefault(c_str, []).append(t_name)
+            taxes_json = json.dumps({k: ", ".join(v) for k, v in taxes_by_comp.items()})
+
             codigos_barra = ", ".join(barcodes_map[bid] for bid in p.get("barcode_ids", []) if bid in barcodes_map)
 
             estado_raw = p.get(studio_field)
             estado = estado_selection_map.get(estado_raw, estado_raw) if estado_raw else ""
 
-            rows_to_insert.append((
+            product_rows.append((
                 pid,
                 p.get("default_code") or "",
                 p.get("name") or "",
                 float(p.get("list_price") or 0.0),
-                impuestos,
-                json.dumps(valid_tax_ids),
+                taxes_json,
                 marca,
                 codigos_barra,
                 estado,
-                stock_por_almacen[5].get(pid, 0.0),
-                stock_por_almacen[6].get(pid, 0.0),
-                stock_por_almacen[7].get(pid, 0.0),
             ))
 
-        replace_all_products(rows_to_insert)
+        replace_all_catalog(product_rows, warehouse_rows, stock_rows)
         elapsed = round(time.time() - t0, 1)
         now_str = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
         update_sync_status(
             "idle",
-            f"Sincronizado en {elapsed}s",
+            f"Sincronizado en {elapsed}s ({len(warehouse_rows)} almacenes)",
             last_sync=now_str,
-            total_products=len(rows_to_insert),
+            total_products=len(product_rows),
         )
     except Exception as e:
         update_sync_status("error", f"Error: {str(e)}")

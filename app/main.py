@@ -13,11 +13,13 @@ from app.database import (
     init_db,
     query_products_datatables,
     get_sync_status,
+    get_all_warehouses,
     log_quotation,
 )
 from app.odoo_sync import run_full_sync
 from app.odoo_client import (
     authenticate_odoo_user,
+    get_all_companies,
     search_customers,
     create_draft_quotation,
     get_quotation_options,
@@ -42,6 +44,12 @@ def get_current_user(request: Request):
     if not user:
         raise HTTPException(status_code=401, detail="No autenticado")
     return user
+
+def validate_user_company(user: dict, company_id: int) -> list:
+    allowed = [int(c["id"]) for c in user.get("allowed_companies", [])]
+    if company_id not in allowed:
+        raise HTTPException(status_code=403, detail="No tenés permisos sobre la compañía seleccionada.")
+    return allowed
 
 # --- RUTAS DE AUTENTICACIÓN ---
 @app.get("/login", response_class=HTMLResponse)
@@ -74,11 +82,14 @@ def login_submit(request: Request, username: str = Form(...), password: str = Fo
     expected_pass = os.getenv("APP_PASSWORD", "")
     if expected_user and expected_pass and username == expected_user and password == expected_pass:
         login_attempts.pop(client_ip, None)
+        all_comps = get_all_companies()
         request.session["user"] = {
             "uid": 0,
             "name": f"Admin ({username})",
             "login": username,
             "partner_id": None,
+            "allowed_companies": all_comps,
+            "default_company_id": all_comps[0]["id"] if all_comps else 1,
         }
         return RedirectResponse(url="/", status_code=302)
 
@@ -106,9 +117,14 @@ def index(request: Request):
         {
             "request": request,
             "user": user,
+            "warehouses": get_all_warehouses(),
             "odoo_url": os.getenv("ODOO_URL", "").rstrip("/"),
         },
     )
+
+@app.get("/api/warehouses")
+def api_warehouses(user: dict = Depends(get_current_user)):
+    return JSONResponse(get_all_warehouses())
 
 # --- API DE PRODUCTOS (DATATABLES SERVER-SIDE) ---
 @app.get("/api/products")
@@ -118,9 +134,12 @@ def api_products(request: Request, user: dict = Depends(get_current_user)):
     start = int(params.get("start", 0))
     length = min(int(params.get("length", 25)), 200)
     search_value = params.get("search[value]", "")
-    order_col_idx = int(params.get("order[0][column]", 0))
+    order_col_idx = int(params.get("order[0][column]", 1))
     order_dir = params.get("order[0][dir]", "asc")
     only_in_stock = params.get("only_in_stock", "false").lower() == "true"
+    company_id = int(params.get("company_id", user.get("default_company_id", 1)))
+
+    validate_user_company(user, company_id)
 
     result = query_products_datatables(
         start=start,
@@ -128,6 +147,7 @@ def api_products(request: Request, user: dict = Depends(get_current_user)):
         search_value=search_value,
         order_col_idx=order_col_idx,
         order_dir=order_dir,
+        company_id=company_id,
         only_in_stock=only_in_stock,
     )
     return JSONResponse({
@@ -153,18 +173,20 @@ def api_trigger_sync(user: dict = Depends(get_current_user)):
 
 # --- API DE OPCIONES, CLIENTES Y COTIZACIONES ---
 @app.get("/api/quotation-options")
-def api_quotation_options(user: dict = Depends(get_current_user)):
+def api_quotation_options(company_id: int, user: dict = Depends(get_current_user)):
+    allowed = validate_user_company(user, company_id)
     try:
-        return JSONResponse(get_quotation_options())
+        return JSONResponse(get_quotation_options(company_id, allowed))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/customers")
-def api_customers(q: str = "", user: dict = Depends(get_current_user)):
+def api_customers(company_id: int, q: str = "", user: dict = Depends(get_current_user)):
+    allowed = validate_user_company(user, company_id)
     if len(q.strip()) < 2:
         return JSONResponse([])
     try:
-        partners = search_customers(q.strip())
+        partners = search_customers(q.strip(), company_id, allowed)
         return JSONResponse(partners)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -175,9 +197,9 @@ class QuotationLineIn(BaseModel):
     qty: float
     price_unit: float
     discount: float = 0.0
-    tax_ids: List[int] = []
 
 class QuotationCreateIn(BaseModel):
+    company_id: int
     partner_id: int
     customer_name: str
     type_id: Optional[int] = None
@@ -188,10 +210,13 @@ class QuotationCreateIn(BaseModel):
 
 @app.post("/api/quotations")
 def api_create_quotation(payload: QuotationCreateIn, user: dict = Depends(get_current_user)):
+    allowed = validate_user_company(user, payload.company_id)
     if not payload.lines:
         raise HTTPException(status_code=400, detail="La cotización debe tener al menos un producto.")
     try:
         res = create_draft_quotation(
+            company_id=payload.company_id,
+            allowed_company_ids=allowed,
             partner_id=payload.partner_id,
             lines=[line.model_dump() for line in payload.lines],
             creator_user=user,
@@ -202,10 +227,10 @@ def api_create_quotation(payload: QuotationCreateIn, user: dict = Depends(get_cu
         )
         log_quotation(
             username=user.get("login", "desconocido"),
+            company_id=payload.company_id,
             order_id=res["order_id"],
             order_name=res["order_name"],
             customer_name=payload.customer_name,
-            warehouse_id=payload.type_id or 0,
             items_count=len(payload.lines),
             amount_total=res["amount_total"],
         )
