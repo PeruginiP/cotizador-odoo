@@ -441,9 +441,10 @@ def extract_invoice_with_gemini(file_bytes: bytes, mime_type: str) -> dict:
     for idx, r in enumerate(data.get("lines") or []):
         qty = float(r.get("quantity") or 1.0)
         price = float(r.get("unit_price") or 0.0)
-        disc = abs(float(r.get("discount_percentage") or 0.0))
+        disc = round(abs(float(r.get("discount_percentage") or 0.0)), 2)
         net = float(r.get("line_net_total") or round(qty * price * (1.0 - disc / 100.0), 2))
 
+        # Protección anti doble-descuento si Gemini ya puso el neto en unit_price
         if disc > 0 and qty > 0 and net > 0:
             if abs((qty * price) - net) <= 1.0 and abs((qty * price * (1.0 - disc / 100.0)) - net) > 5.0:
                 disc = 0.0
@@ -464,20 +465,23 @@ def extract_invoice_with_gemini(file_bytes: bytes, mime_type: str) -> dict:
             "description": desc_clean,
             "uom_label": uom_lbl,
             "billed_qty": qty,
+            "billed_unit_price": price,
             "pack_size": pack_mult,
             "pack_applied": False,
             "quantity": qty,
-            "orig_list_price": price,
-            "orig_discount_pct": disc,
             "unit_price": price,
             "discount_percentage": disc,
-            "line_net_total": net,
+            "line_net_total": round(qty * price * (1.0 - disc / 100.0), 2),
         })
 
-    # Calibrar todas las líneas a Precio Unitario Neto exacto (discount = 0%) cuadrando con net_taxable_base del PDF
-    target_net = header["net_taxable_base"]
-    if target_net > 0:
-        lines = calibrate_net_unit_prices(lines, target_net, price_decimals=4)
+    # Si hay descuento global en el pie (ej. Micro Control) y las líneas vienen en 0%, asignar el % de dto a las líneas
+    global_disc = header["global_discount_amount"]
+    sum_lines_gross = sum(l["billed_qty"] * l["billed_unit_price"] for l in lines)
+    if global_disc > 0 and sum_lines_gross > global_disc and all(l["discount_percentage"] == 0.0 for l in lines):
+        disc_2dec = round((global_disc / sum_lines_gross) * 100.0, 2)
+        for l in lines:
+            l["discount_percentage"] = disc_2dec
+            l["line_net_total"] = round(l["quantity"] * l["unit_price"] * (1.0 - disc_2dec / 100.0), 2)
 
     raw_csv = _build_flat_csv(header, lines)
 

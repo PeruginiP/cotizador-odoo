@@ -1766,14 +1766,13 @@ def auto_match_invoice_lines_to_pos(
     matched_out = []
     for inv_idx, inv_ln in enumerate(invoice_lines):
         billed_qty = float(inv_ln.get("billed_qty") or inv_ln.get("quantity") or 1.0)
-        line_sub = round(float(inv_ln.get("line_net_total") or (
-            float(inv_ln.get("quantity") or 1.0) * float(inv_ln.get("unit_price") or 0.0) * (1.0 - float(inv_ln.get("discount_percentage") or 0.0) / 100.0)
-        )), 2)
+        billed_price = float(inv_ln.get("billed_unit_price") or inv_ln.get("unit_price") or 0.0)
+        disc_pct = round(float(inv_ln.get("discount_percentage") or 0.0), 2)
 
         if inv_idx in assigned_inv:
             best_pl, best_score, use_unpack, chosen_pack = assigned_inv[inv_idx]
             eff_qty = round(billed_qty * chosen_pack, 4) if use_unpack else billed_qty
-            eff_unit_price = round(line_sub / eff_qty, 4) if eff_qty > 0 else 0.0
+            eff_list_price = round(billed_price / chosen_pack, 4) if (use_unpack and chosen_pack > 0) else billed_price
             pl_eff_unit = round(float(best_pl["price_unit"] or 0.0) * (1.0 - float(best_pl.get("discount") or 0.0) / 100.0), 4)
 
             line_tax_ids = best_pl["tax_ids"] if best_pl["tax_ids"] else ([fallback_vat["id"]] if fallback_vat else [])
@@ -1782,12 +1781,14 @@ def auto_match_invoice_lines_to_pos(
             matched_out.append({
                 **inv_ln,
                 "billed_qty": billed_qty,
+                "billed_unit_price": billed_price,
+                "can_unpack": bool(use_unpack and chosen_pack > 1.0),
                 "pack_size": chosen_pack,
                 "pack_applied": use_unpack,
                 "quantity": eff_qty,
-                "unit_price": eff_unit_price,
-                "discount_percentage": 0.0,
-                "line_net_total": round(eff_qty * eff_unit_price, 2),
+                "unit_price": eff_list_price,
+                "discount_percentage": disc_pct,
+                "line_net_total": round(eff_qty * eff_list_price * (1.0 - disc_pct / 100.0), 2),
                 "matched_po_line_id": best_pl["po_line_id"],
                 "matched_po_name": best_pl["po_name"],
                 "product_id": best_pl["product_id"],
@@ -1804,6 +1805,8 @@ def auto_match_invoice_lines_to_pos(
             matched_out.append({
                 **inv_ln,
                 "billed_qty": billed_qty,
+                "billed_unit_price": billed_price,
+                "can_unpack": bool(float(inv_ln.get("pack_size") or 1.0) > 1.0),
                 "matched_po_line_id": None,
                 "matched_po_name": "",
                 "product_id": None,
@@ -1816,12 +1819,6 @@ def auto_match_invoice_lines_to_pos(
                 "tax_names": fallback_lbl,
                 "match_confidence": 0,
             })
-
-    # Re-calibrar decimales de unit_price luego de desempaquetar cajas para mantener Neto PDF exacto
-    target_net = float((header or {}).get("net_taxable_base") or 0.0)
-    if target_net > 0:
-        from app.invoice_extractor import calibrate_net_unit_prices
-        matched_out = calibrate_net_unit_prices(matched_out, target_net, price_decimals=4)
 
     return matched_out
 
@@ -2168,8 +2165,8 @@ def create_draft_vendor_bill(
     linked_po_names = set()
     tax_field = "tax_ids" if "tax_ids" in aml_meta else "invoice_line_tax_ids"
 
-    # Determinar precisión real de price_unit en Odoo (ej. 2 o 4 decimales) y cuadrar Neto exacto
-    price_digits = 2
+    # Respetar Precio Lista + % Descuento en cada línea, y agregar 1 línea final de ajuste si hay diferencia de redondeo vs Neto PDF
+    price_digits = 4
     try:
         dp_recs = models.execute_kw(
             db, uid, password, "decimal.precision", "search_read",
@@ -2181,16 +2178,22 @@ def create_draft_vendor_bill(
         pass
 
     target_net_pdf = round(float(header.get("net_taxable_base") or 0.0), 2)
-    if target_net_pdf > 0:
-        from app.invoice_extractor import calibrate_net_unit_prices
-        lines = calibrate_net_unit_prices(lines, target_net_pdf, price_decimals=price_digits)
-        current_net_sum = round(sum(round(float(x.get("quantity") or 0) * float(x.get("unit_price") or 0), 2) for x in lines), 2)
-        net_residual = round(target_net_pdf - current_net_sum, 2)
-        # Si Product Price en Odoo tiene 2 decimales y quedó un residuo de ej. $0.03, agregar línea de redondeo neto
-        if abs(net_residual) >= 0.01 and abs(net_residual) <= 50.0:
+    if target_net_pdf > 0 and lines:
+        odoo_simulated_net = round(sum(
+            round(
+                float(x.get("quantity") or 0.0)
+                * round(float(x.get("unit_price") or 0.0), price_digits)
+                * (1.0 - round(float(x.get("discount_percentage") or 0.0), 2) / 100.0),
+                2,
+            )
+            for x in lines
+        ), 2)
+        net_residual = round(target_net_pdf - odoo_simulated_net, 2)
+        # Si difiere por centavos o por truncamiento de 2 decimales de descuento (hasta un 2% del neto), agregar ajuste al final
+        if abs(net_residual) >= 0.01 and abs(net_residual) <= max(50.0, target_net_pdf * 0.02):
             default_line_taxes = [int(t) for t in (lines[0].get("tax_ids") or []) if t]
             lines.append({
-                "description": "Ajuste por redondeo de precios unitarios",
+                "description": "Ajuste por redondeo / decimales de bonificación",
                 "product_id": None,
                 "purchase_line_id": None,
                 "po_name": "",
