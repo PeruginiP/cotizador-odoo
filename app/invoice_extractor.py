@@ -78,24 +78,44 @@ vendor_name,vendor_cuit,document_type,invoice_letter,invoice_number,invoice_date
 - `total_amount`: Total final a pagar de la factura (Float).
 """
 
-def _compute_due_date_from_terms(invoice_date_str: str, due_date_str: str, payment_terms: str) -> str:
-    """Si no vino due_date explícito pero payment_terms tiene un plazo único en días (ej. '30 dias fecha factura'), lo calcula."""
-    if due_date_str:
-        return due_date_str
-    if not invoice_date_str or not payment_terms:
-        return ""
-    # Evitar plazos múltiples tipo '30/60/90'
-    if re.search(r"\d+\s*[/,-]\s*\d+", payment_terms):
-        return ""
-    m = re.search(r"\b(\d{1,3})\s*d[ií]as?\b", payment_terms.lower())
-    if m:
-        days = int(m.group(1))
+def _sanitize_and_compute_due_date(invoice_date_str: str, due_date_str: str, payment_terms: str) -> str:
+    """
+    1. Detecta y anula automáticamente el Vencimiento del CAE (típicamente +10 u +11 días desde emisión).
+    2. Calcula el vencimiento real si payment_terms indica días (ej. '30 días Fecha Factura').
+    """
+    inv_dt = None
+    if invoice_date_str:
         try:
-            dt = datetime.strptime(invoice_date_str, "%Y-%m-%d") + timedelta(days=days)
-            return dt.strftime("%Y-%m-%d")
+            inv_dt = datetime.strptime(invoice_date_str, "%Y-%m-%d")
         except ValueError:
             pass
-    return ""
+
+    # Extraer cantidad de días de payment_terms si existe (ej: '30 días Fecha Factura' -> 30)
+    term_days = None
+    if payment_terms and not re.search(r"\d+\s*[/,-]\s*\d+", payment_terms):
+        m = re.search(r"\b(\d{1,3})\s*d[ií]as?\b", payment_terms.lower())
+        if m:
+            term_days = int(m.group(1))
+
+    # Verificar si Gemini coló la fecha de Vto. del CAE en due_date
+    if due_date_str and inv_dt:
+        try:
+            due_dt = datetime.strptime(due_date_str, "%Y-%m-%d")
+            delta_days = (due_dt - inv_dt).days
+            # En AFIP/ARCA el CAE vence a los 10 días (a veces 9-11).
+            # Si payment_terms pide otro plazo (ej. 30 días) o está vacío y delta es 9..11 días, es Vto. CAE:
+            if (term_days and abs(delta_days - term_days) > 3 and 8 <= delta_days <= 12) or (
+                not term_days and 9 <= delta_days <= 11 and "contado" not in (payment_terms or "").lower()
+            ):
+                due_date_str = ""  # Descartar fecha falsa del CAE
+        except ValueError:
+            due_date_str = ""
+
+    # Si no quedó fecha explícita válida pero tenemos plazo en días en payment_terms, calcularla exacto
+    if not due_date_str and inv_dt and term_days is not None:
+        return (inv_dt + timedelta(days=term_days)).strftime("%Y-%m-%d")
+
+    return due_date_str or ""
 
 def _safe_float(val, default=0.0) -> float:
     if val is None:
@@ -255,7 +275,8 @@ def extract_invoice_with_gemini(file_bytes: bytes, mime_type: str) -> dict:
         raw_po = (r.get("purchase_order_number") or "").strip()
         if raw_po:
             for tok in re.split(r"[/,;]+", raw_po):
-                clean_tok = tok.strip()
+                # Quitar porcentajes pegados como "94076 5%"
+                clean_tok = re.sub(r"\s+\d+(?:[.,]\d+)?\s*%.*$", "", tok.strip()).strip()
                 if clean_tok and clean_tok not in po_candidates:
                     po_candidates.append(clean_tok)
 
@@ -290,6 +311,13 @@ def extract_invoice_with_gemini(file_bytes: bytes, mime_type: str) -> dict:
     }
 
     lines = []
+    global_disc = header["global_discount_amount"]
+    sum_lines_gross = sum(l["line_net_total"] for l in lines)
+    if global_disc > 0 and sum_lines_gross > global_disc and all(l["discount_percentage"] == 0.0 for l in lines):
+        exact_disc_pct = round((global_disc / sum_lines_gross) * 100.0, 4)
+        for l in lines:
+            l["discount_percentage"] = exact_disc_pct
+            l["line_net_total"] = round(l["quantity"] * l["unit_price"] * (1.0 - exact_disc_pct / 100.0), 2)
     for idx, r in enumerate(rows):
         qty = _safe_float(r.get("quantity"), 1.0)
         price = _safe_float(r.get("unit_price"), 0.0)

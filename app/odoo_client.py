@@ -1430,49 +1430,71 @@ def _infer_default_vat_tax(header: dict, vat_taxes: list):
             return t
     return vat_taxes[0] if vat_taxes else None
 
+def _single_code_similarity(inv_code: str, odoo_code: str) -> float:
+    """
+    Calcula similitud difusa entre un código de factura (ej. 'D101CDT10' o 'D101CDT10-034')
+    y un código de Odoo/proveedor (ej. 'CDT 10', 'MC-CDT10', 'CDT 10 034').
+    """
+    a = re.sub(r"[^a-z0-9]", "", (inv_code or "").lower())
+    b = re.sub(r"[^a-z0-9]", "", (odoo_code or "").lower())
+    if not a or not b or len(a) < 2 or len(b) < 2:
+        return 0.0
+    if a == b:
+        return 1.0
+
+    # Quitar prefijos típicos de rubro de proveedor (ej: D101, C101, M102, N201, S101 = 1 letra + 3 dígitos)
+    a_noprefix = re.sub(r"^[a-z]\d{3}", "", a)
+    # Quitar prefijo de letras de Argelec si existiera (ej: MC, IMSA) cuando precede al mismo código
+    b_noprefix = re.sub(r"^[a-z]{1,4}(?=[a-z]\d|\d)", "", b)
+
+    if a_noprefix and len(a_noprefix) >= 3:
+        if a_noprefix == b or a_noprefix == b_noprefix:
+            return 0.96
+
+    shorter, longer = (a, b) if len(a) <= len(b) else (b, a)
+    len_ratio = len(shorter) / len(longer)
+
+    # Contención exacta del código corto dentro del largo (ej: 'cdt10' dentro de 'd101cdt10')
+    if len(shorter) >= 3 and shorter in longer:
+        if longer.endswith(shorter):
+            # Termina exactamente igual (solo tenía prefijo agregado adelante)
+            return 0.85 + 0.10 * len_ratio
+        if longer.startswith(shorter):
+            # Empieza igual pero le sobran caracteres atrás (ej: 'cdt10' en 'cdt10034') -> puntaje moderado
+            return 0.55 + 0.30 * len_ratio
+        return 0.65 + 0.25 * len_ratio
+
+    # Subcadena común continua más larga + SequenceMatcher general
+    lcs = SequenceMatcher(None, a, b).find_longest_match(0, len(a), 0, len(b)).size
+    seq_ratio = SequenceMatcher(None, a, b).ratio()
+    if lcs >= 4:
+        return max(seq_ratio * 0.85, (lcs / max(len(a), len(b))) * 0.88)
+
+    return seq_ratio * 0.55
+
+
 def _score_product_codes(inv_codes: list, vendor_codes: list, internal_code: str, pl_desc: str) -> float:
-    """
-    Compara todos los códigos extraídos del PDF contra:
-    1. product.supplierinfo.product_code (match exacto = 0.85, parcial = 0.70)
-    2. product.product.default_code contemplando prefijos/sufijos de letras propios de Argelec (0.65)
-    """
     if not inv_codes:
         return 0.0
 
-    def norm(c: str) -> str:
-        return re.sub(r"[^a-z0-9]", "", (c or "").lower())
+    candidates_high = [c for c in (vendor_codes or []) if c]
+    candidates_med = [internal_code] if internal_code else []
 
-    norm_inv = [norm(c) for c in inv_codes if len(norm(c)) >= 3]
-    norm_sup = [norm(c) for c in (vendor_codes or []) if len(norm(c)) >= 3]
-    norm_int = norm(internal_code)
+    # También extraer posibles códigos entre corchetes o tokens alfanuméricos de la descripción de la OC
+    bracket_codes = re.findall(r"\[([^\]]+)\]", pl_desc or "")
+    candidates_med.extend(bracket_codes)
 
     best = 0.0
-    for ic in norm_inv:
-        # 1. Cruce prioritario contra product.supplierinfo.product_code
-        for sc in norm_sup:
-            if ic == sc:
-                return 0.85
-            if len(ic) >= 4 and len(sc) >= 4 and (ic in sc or sc in ic):
-                best = max(best, 0.72)
-
-        # 2. Cruce contra default_code interno de Argelec (que suele tener letras agregadas al inicio/fin)
-        if norm_int:
-            if ic == norm_int:
-                best = max(best, 0.78)
-            elif len(ic) >= 4 and (ic in norm_int or norm_int in ic):
-                best = max(best, 0.65)
-            else:
-                # Comparar núcleo numérico si tiene al menos 5 dígitos (ej. prov '100025' vs interno 'IM100025AR')
-                ic_digits = re.sub(r"\D", "", ic)
-                int_digits = re.sub(r"\D", "", norm_int)
-                if len(ic_digits) >= 5 and ic_digits == int_digits:
-                    best = max(best, 0.58)
-
-        # 3. Código mencionado dentro de la descripción de la línea de OC
-        if len(ic) >= 4 and ic in norm(pl_desc):
-            best = max(best, 0.50)
+    for ic in inv_codes:
+        for vc in candidates_high:
+            # Peso completo si matchea contra product.supplierinfo.product_code
+            best = max(best, _single_code_similarity(ic, vc))
+        for mc in candidates_med:
+            # Peso apenas menor (x0.97) contra default_code interno con agregados
+            best = max(best, _single_code_similarity(ic, mc) * 0.97)
 
     return best
+
 
 def auto_match_invoice_lines_to_pos(
     invoice_lines: list,
@@ -1480,62 +1502,93 @@ def auto_match_invoice_lines_to_pos(
     header: dict = None,
     vat_taxes: list = None,
 ) -> list:
+    """
+    Empareja cada línea de la factura con la línea más parecida de la(s) OC evaluando globalmente:
+    Similitud de código aproximado (peso principal) + Similitud de descripción/medidas + Cantidad pendiente.
+    """
     pool = []
     for po in purchase_orders:
         for pl in po.get("lines", []):
             pool.append(pl)
 
     fallback_vat = _infer_default_vat_tax(header or {}, vat_taxes or [])
-    used_po_lines = set()
-    matched_out = []
+    if not pool:
+        return [
+            {
+                **inv_ln,
+                "matched_po_line_id": None,
+                "matched_po_name": "",
+                "product_id": None,
+                "odoo_product_label": "",
+                "po_qty_pending": None,
+                "po_price_unit": None,
+                "po_discount": None,
+                "tax_ids": [fallback_vat["id"]] if fallback_vat else [],
+                "tax_names": fallback_vat["name"] if fallback_vat else "Seleccionar IVA",
+                "match_confidence": 0,
+            }
+            for inv_ln in invoice_lines
+        ]
 
-    for inv_ln in invoice_lines:
-        inv_code = (inv_ln.get("product_code") or "").strip().lower()
+    # Calcular matriz de puntajes de todos contra todos para elegir el mejor par único sin pisarse
+    candidate_pairs = []
+    for inv_idx, inv_ln in enumerate(invoice_lines):
+        inv_codes = inv_ln.get("product_codes") or [
+            c.strip() for c in re.split(r"[/|;]+", inv_ln.get("product_code") or "") if c.strip()
+        ]
         inv_desc = (inv_ln.get("description") or "").strip().lower()
         inv_qty = float(inv_ln.get("quantity") or 0.0)
-        inv_price = float(inv_ln.get("unit_price") or 0.0)
-        inv_codes = inv_ln.get("product_codes") or (
-            [c.strip() for c in re.split(r"[/|;]+", inv_ln.get("product_code") or "") if c.strip()]
-        )
-        best_pl = None
-        best_score = 0.0
+        inv_disc = float(inv_ln.get("discount_percentage") or 0.0)
+        inv_eff_price = float(inv_ln.get("unit_price") or 0.0) * (1.0 - inv_disc / 100.0)
 
-        for pl in pool:
+        for pl_idx, pl in enumerate(pool):
             pl_desc = f"{pl.get('product_name', '')} {pl.get('description', '')}".strip().lower()
-            score = _score_product_codes(
+
+            code_sim = _score_product_codes(
                 inv_codes=inv_codes,
                 vendor_codes=pl.get("vendor_codes", []),
                 internal_code=pl.get("default_code", ""),
                 pl_desc=pl_desc,
             )
-            pl_id = pl["po_line_id"]
-            pl_code = (pl.get("default_code") or "").strip().lower()
-            pl_desc = f"{pl.get('product_name', '')} {pl.get('description', '')}".strip().lower()
+            desc_sim = SequenceMatcher(None, inv_desc, pl_desc).ratio() if (inv_desc and pl_desc) else 0.0
 
-            score = 0.0
-            if inv_code and pl_code and (inv_code == pl_code or inv_code in pl_code or pl_code in inv_code):
-                score += 0.65
-            elif inv_code and inv_code in pl_desc:
-                score += 0.50
-
-            if inv_desc and pl_desc:
-                score += SequenceMatcher(None, inv_desc, pl_desc).ratio() * 0.45
-
+            # Comparación de cantidad (muy útil para desempatar cajas 10x10 vs 20x20 o caños de distinta medida)
             ref_qty = pl["qty_pending"] if pl["qty_pending"] > 0 else pl["product_qty"]
-            if ref_qty > 0 and abs(inv_qty - ref_qty) / max(ref_qty, 1.0) <= 0.05:
-                score += 0.15
-            if pl["price_unit"] > 0 and abs(inv_price - pl["price_unit"]) / pl["price_unit"] <= 0.05:
-                score += 0.15
+            qty_bonus = 0.0
+            if ref_qty > 0 and inv_qty > 0:
+                if abs(inv_qty - ref_qty) < 0.01:
+                    qty_bonus = 0.18  # Cantidad exacta idéntica
+                elif abs(inv_qty - ref_qty) / max(ref_qty, inv_qty) <= 0.15:
+                    qty_bonus = 0.08
 
-            if pl_id in used_po_lines:
-                score -= 0.25
+            # Comparación de precio neto efectivo (considerando descuento global como el 44.79% de Micro Control)
+            pl_eff_price = float(pl["price_unit"] or 0.0) * (1.0 - float(pl.get("discount") or 0.0) / 100.0)
+            price_bonus = 0.0
+            if pl_eff_price > 0 and inv_eff_price > 0:
+                if abs(inv_eff_price - pl_eff_price) / pl_eff_price <= 0.03:
+                    price_bonus = 0.12
 
-            if score > best_score:
-                best_score = score
-                best_pl = pl
+            # Puntaje ponderado final
+            total_score = (code_sim * 0.65) + (desc_sim * 0.25) + qty_bonus + price_bonus
+            candidate_pairs.append((total_score, inv_idx, pl_idx))
 
-        if best_pl and best_score >= 0.28:
-            used_po_lines.add(best_pl["po_line_id"])
+    # Ordenar de mayor a menor certeza para asignar primero los cruces más claros (ej. CDT10-034 antes que CDT10)
+    candidate_pairs.sort(key=lambda x: x[0], reverse=True)
+
+    assigned_inv = {}
+    used_pl = set()
+    for score, inv_idx, pl_idx in candidate_pairs:
+        if score < 0.26:
+            break
+        if inv_idx not in assigned_inv and pl_idx not in used_pl:
+            assigned_inv[inv_idx] = (pool[pl_idx], score)
+            used_pl.add(pl_idx)
+
+    # Construir salida respetando el orden original de la factura
+    matched_out = []
+    for inv_idx, inv_ln in enumerate(invoice_lines):
+        if inv_idx in assigned_inv:
+            best_pl, best_score = assigned_inv[inv_idx]
             line_tax_ids = best_pl["tax_ids"] if best_pl["tax_ids"] else ([fallback_vat["id"]] if fallback_vat else [])
             line_tax_names = best_pl["tax_names"] if best_pl["tax_ids"] else (fallback_vat["name"] if fallback_vat else "Sin IVA")
             matched_out.append({
@@ -1567,7 +1620,6 @@ def auto_match_invoice_lines_to_pos(
             })
 
     return matched_out
-
 
 def _resolve_ar_latam_document_type(models, db, uid, password, doc_type_str: str, letter: str, ctx: dict):
     """Resuelve con exactitud el código AFIP/ARCA en l10n_latam.document.type (ej. código '1' = Factura A)."""
