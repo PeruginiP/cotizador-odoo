@@ -96,7 +96,7 @@ Extrae con precisión quirúrgica los datos de la factura de proveedor adjunta r
 5. PRECIO LISTA vs PRECIO NETO BONIFICADO: Si la línea muestra Precio Lista (`17095.25`), `% Bonif` (`-37.00`) y Precio Neto (`10770.01`), pon el Precio Lista (`17095.25`) en `unit_price` y `37.0` (positivo) en `discount_percentage`.
 6. DESCUENTO GLOBAL DE PIE (ej. Micro Control): Si las líneas vienen a precio bruto sin descuento individual pero en el pie se resta un renglón `DESCUENTOS` antes del Subtotal Neto Gravado, coloca ese monto en `global_discount_amount`.
 7. MONEDA REAL Y TC DE REFERENCIA: Si el total final dice `TOTAL PESOS` (aunque mencione una cotización referencial `u$s: 1525.00` en notas), `currency` debe ser `"ARS"`, `exchange_rate` `1.0` y debes guardar `1525.0` en `reference_exchange_rate`. Solo usa `currency = "USD"` cuando la factura esté emitida y totalizada en dólares (en cuyo caso pon el tipo de cambio en `exchange_rate`).
-
+"""
 CSV_EXPORT_HEADERS = [
     "vendor_name", "vendor_cuit", "document_type", "invoice_letter", "invoice_number",
     "invoice_date", "due_date", "payment_terms", "cae_number", "currency",
