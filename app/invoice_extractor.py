@@ -2,8 +2,10 @@ import csv
 import io
 import os
 import re
+import time
 from google import genai
 from google.genai import types
+from google.genai import errors as genai_errors
 
 SYSTEM_PROMPT = """# ROL Y OBJETIVO
 Eres un especialista en extracción de datos contables argentinos (normativa AFIP/ARCA) e integración ERP con Odoo. Tu tarea es extraer datos de facturas de proveedores y estructurarlos en un formato CSV estricto, diseñado para conciliar facturas contra Órdenes de Compra (OC) preexistentes en Odoo.
@@ -75,6 +77,156 @@ def _parse_perceptions_detail(detail_str: str) -> list:
 
 
 def extract_invoice_with_gemini(file_bytes: bytes, mime_type: str) -> dict:
+    api_key = os.getenv("GEMINI_API_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError("Falta configurar GEMINI_API_KEY en las variables de entorno.")
+
+    primary_model = os.getenv("GEMINI_MODEL", "gemini-3.8-flash").strip()
+    thinking_lvl = os.getenv("GEMINI_THINKING_LEVEL", "LOW").strip().upper()
+
+    # Cadena de respaldo automática ante picos de demanda (503) o rate limit (429)
+    fallback_candidates = [
+        primary_model,
+        "gemini-3.8-flash",
+        "gemini-3.5-flash-lite",
+        "gemini-2.5-flash",
+    ]
+    models_to_try = list(dict.fromkeys(m for m in fallback_candidates if m))
+
+    client = genai.Client(api_key=api_key)
+    contents = [
+        types.Content(
+            role="user",
+            parts=[
+                types.Part(inline_data=types.Blob(mime_type=mime_type, data=file_bytes)),
+                types.Part.from_text(
+                    text="Extrae los datos del comprobante en CSV plano según las reglas."
+                ),
+            ],
+        )
+    ]
+
+    response = None
+    used_model = primary_model
+    last_error = None
+
+    for model_name in models_to_try:
+        # Construir configuración compatible según el modelo de la cadena
+        cfg_kwargs = {"system_instruction": SYSTEM_PROMPT, "temperature": 0.0}
+        try:
+            if "3.8" in model_name or "3.5" in model_name:
+                lvl = "LOW" if ("3.8" in model_name and thinking_lvl == "MINIMAL") else thinking_lvl
+                cfg_kwargs["thinking_config"] = types.ThinkingConfig(thinking_level=lvl)
+            cfg_kwargs["media_resolution"] = "MEDIA_RESOLUTION_MEDIUM"
+            config = types.GenerateContentConfig(**cfg_kwargs)
+        except Exception:
+            cfg_kwargs.pop("thinking_config", None)
+            cfg_kwargs.pop("media_resolution", None)
+            config = types.GenerateContentConfig(**cfg_kwargs)
+
+        # Hasta 2 intentos por modelo antes de saltar al siguiente modelo de respaldo
+        for attempt in range(2):
+            try:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=contents,
+                    config=config,
+                )
+                used_model = model_name
+                break
+            except Exception as exc:
+                last_error = exc
+                err_str = str(exc).upper()
+                is_transient = any(
+                    code in err_str
+                    for code in ("503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED", "OVERLOADED", "500")
+                )
+                if is_transient:
+                    # Espera corta (1.5s en intento 1, luego pasa al siguiente modelo)
+                    time.sleep(1.5 * (attempt + 1))
+                    continue
+                # Si el nombre del modelo no existe en tu tier/región (404), probar el siguiente
+                if "404" in err_str or "NOT_FOUND" in err_str or "INVALID_ARGUMENT" in err_str:
+                    break
+                raise
+
+        if response is not None:
+            break
+
+    if response is None:
+        raise RuntimeError(
+            f"Los modelos de Gemini están temporalmente saturados tras varios intentos. Último detalle: {last_error}"
+        )
+
+    raw_csv = _clean_csv_text(response.text or "")
+    if not raw_csv:
+        raise ValueError("Gemini devolvió una respuesta vacía.")
+
+    rows = list(csv.DictReader(io.StringIO(raw_csv)))
+    if not rows:
+        raise ValueError(f"No se pudo parsear el CSV devuelto: {raw_csv[:300]}")
+
+    first = rows[0]
+    po_candidates = []
+    for r in rows:
+        raw_po = (r.get("purchase_order_number") or "").strip()
+        if raw_po:
+            for tok in re.split(r"[/,;]+", raw_po):
+                clean_tok = tok.strip()
+                if clean_tok and clean_tok not in po_candidates:
+                    po_candidates.append(clean_tok)
+
+    header = {
+        "vendor_name": (first.get("vendor_name") or "").strip(),
+        "vendor_cuit": (first.get("vendor_cuit") or "").strip(),
+        "document_type": (first.get("document_type") or "FACTURA").strip().upper(),
+        "invoice_letter": (first.get("invoice_letter") or "A").strip().upper(),
+        "invoice_number": (first.get("invoice_number") or "").strip(),
+        "invoice_date": (first.get("invoice_date") or "").strip(),
+        "due_date": (first.get("due_date") or "").strip(),
+        "cae_number": re.sub(r"\D", "", first.get("cae_number") or ""),
+        "currency": (first.get("currency") or "ARS").strip().upper(),
+        "exchange_rate": _safe_float(first.get("exchange_rate"), 1.0),
+        "purchase_order_number": " / ".join(po_candidates),
+        "po_references": po_candidates,
+        "gross_subtotal": _safe_float(first.get("gross_subtotal"), 0.0),
+        "global_discount_amount": _safe_float(first.get("global_discount_amount"), 0.0),
+        "net_taxable_base": _safe_float(first.get("net_taxable_base"), 0.0),
+        "exempt_amount": _safe_float(first.get("exempt_amount"), 0.0),
+        "total_vat": _safe_float(first.get("total_vat"), 0.0),
+        "other_taxes_perceptions": _safe_float(first.get("other_taxes_perceptions"), 0.0),
+        "perceptions_detail": (first.get("perceptions_detail") or "").strip(),
+        "parsed_perceptions": _parse_perceptions_detail(first.get("perceptions_detail") or ""),
+        "total_amount": _safe_float(first.get("total_amount"), 0.0),
+    }
+
+    lines = []
+    for idx, r in enumerate(rows):
+        qty = _safe_float(r.get("quantity"), 1.0)
+        price = _safe_float(r.get("unit_price"), 0.0)
+        disc = _safe_float(r.get("discount_percentage"), 0.0)
+        net = _safe_float(r.get("line_net_total"), round(qty * price * (1.0 - disc / 100.0), 2))
+        lines.append({
+            "index": idx,
+            "product_code": (r.get("product_code") or "").strip(),
+            "description": (r.get("description") or "").strip(),
+            "quantity": qty,
+            "unit_price": price,
+            "discount_percentage": disc,
+            "line_net_total": net,
+        })
+
+    usage = {}
+    if getattr(response, "usage_metadata", None):
+        um = response.usage_metadata
+        usage = {
+            "prompt_tokens": getattr(um, "prompt_token_count", 0) or 0,
+            "output_tokens": getattr(um, "candidates_token_count", 0) or 0,
+            "total_tokens": getattr(um, "total_token_count", 0) or 0,
+            "model": used_model,
+        }
+
+    return {"header": header, "lines": lines, "raw_csv": raw_csv, "usage": usage}
     api_key = os.getenv("GEMINI_API_KEY", "").strip()
     if not api_key:
         raise RuntimeError("Falta configurar GEMINI_API_KEY en las variables de entorno.")
