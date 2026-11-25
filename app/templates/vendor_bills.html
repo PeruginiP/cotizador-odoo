@@ -710,6 +710,23 @@
             return all;
         }
 
+        function onToggleOrChangePack(idx, applyPack, newPackVal) {
+            const ln = state.lines[idx];
+            const billedQty = parseFloat(ln.billed_qty || ln.quantity || 1);
+            const currentSubtotal = parseFloat(ln.line_net_total || (ln.quantity * ln.unit_price * (1 - (ln.discount_percentage || 0) / 100)));
+            const pk = Math.max(1, parseFloat(newPackVal || ln.pack_size || 1));
+
+            ln.pack_size = pk;
+            ln.pack_applied = Boolean(applyPack && pk > 1);
+            ln.quantity = ln.pack_applied ? +(billedQty * pk).toFixed(4) : billedQty;
+            ln.discount_percentage = 0;
+            ln.unit_price = ln.quantity > 0 ? +(currentSubtotal / ln.quantity).toFixed(4) : 0;
+            ln.line_net_total = +(ln.quantity * ln.unit_price).toFixed(2);
+
+            renderLinesTable();
+            updateTotalsSummary();
+        }
+
         function onChangePOLineMatch(rowIdx, poLineIdStr) {
             const ln = state.lines[rowIdx];
             const plId = poLineIdStr ? parseInt(poLineIdStr) : null;
@@ -720,6 +737,8 @@
                 ln.product_id = pl.product_id;
                 ln.po_qty_pending = pl.qty_pending;
                 ln.po_price_unit = pl.price_unit;
+                ln.po_discount = pl.discount || 0;
+                ln.po_eff_unit_price = +(pl.price_unit * (1 - (pl.discount || 0) / 100)).toFixed(4);
                 ln.tax_ids = pl.tax_ids;
                 ln.tax_names = pl.tax_names;
             } else {
@@ -728,6 +747,7 @@
                 ln.product_id = null;
                 ln.po_qty_pending = null;
                 ln.po_price_unit = null;
+                ln.po_eff_unit_price = null;
             }
             renderLinesTable();
         }
@@ -741,28 +761,53 @@
             const useCrossRate = (invCurr === 'ARS' && secCurr && secCurr !== 'ARS' && compRate > 1.0);
 
             tbody.innerHTML = state.lines.map((ln, idx) => {
-                const sub = (ln.quantity * ln.unit_price * (1 - (ln.discount_percentage || 0) / 100));
+                const sub = +(ln.quantity * ln.unit_price * (1 - (ln.discount_percentage || 0) / 100)).toFixed(2);
+                ln.line_net_total = sub;
 
-                // Semáforo de cantidad
                 let qtyClass = '';
                 if (ln.po_qty_pending !== null && ln.po_qty_pending !== undefined) {
                     qtyClass = ln.quantity <= ln.po_qty_pending + 0.001 ? 'diff-ok' : 'diff-warn';
                 }
 
-                // Semáforo de precio (dividiendo por TC si la factura es ARS y la OC es USD)
+                // Comparar Precio Unitario Neto de Factura contra Precio Unitario Neto de OC (con descuento de OC incluido)
                 let priceClass = '';
                 let priceCompareHint = '';
-                if (ln.po_price_unit !== null && ln.po_price_unit > 0) {
-                    const invComparablePrice = useCrossRate ? (ln.unit_price / compRate) : ln.unit_price;
-                    const pctDiff = Math.abs(invComparablePrice - ln.po_price_unit) / ln.po_price_unit;
+                const poNetRef = (ln.po_eff_unit_price !== null && ln.po_eff_unit_price !== undefined)
+                    ? ln.po_eff_unit_price
+                    : (ln.po_price_unit !== null ? ln.po_price_unit * (1 - (ln.po_discount || 0) / 100) : null);
+
+                if (poNetRef !== null && poNetRef > 0) {
+                    const invEffUnit = ln.unit_price * (1 - (ln.discount_percentage || 0) / 100);
+                    const invComparablePrice = useCrossRate ? (invEffUnit / compRate) : invEffUnit;
+                    const pctDiff = Math.abs(invComparablePrice - poNetRef) / poNetRef;
                     priceClass = pctDiff <= 0.015 ? 'diff-ok' : (pctDiff <= 0.05 ? 'diff-warn' : 'diff-err');
 
                     if (useCrossRate) {
-                        priceCompareHint = `<div style="font-size:0.72rem;">≈ ${secCurr} ${invComparablePrice.toFixed(2)} vs OC ${secCurr} ${ln.po_price_unit}</div>`;
+                        priceCompareHint = `<div style="font-size:0.72rem;">≈ ${secCurr} ${invComparablePrice.toFixed(3)} vs OC ${secCurr} ${poNetRef.toFixed(3)}</div>`;
                     } else {
-                        priceCompareHint = `<div style="font-size:0.72rem;">OC: ${ln.po_price_unit}</div>`;
+                        priceCompareHint = `<div style="font-size:0.72rem;">OC neto: ${poNetRef.toFixed(2)}</div>`;
                     }
                 }
+
+                // Leyenda informativa si el PDF traía Precio Lista + Bonificación absorbida en el Neto
+                const origHint = (ln.orig_discount_pct && ln.orig_discount_pct > 0 && (ln.discount_percentage || 0) === 0)
+                    ? `<div class="text-muted" style="font-size:0.70rem;">Lista: ${Number(ln.orig_list_price || 0).toLocaleString('es-AR', { minimumFractionDigits: 2 })} (-${ln.orig_discount_pct}%)</div>`
+                    : '';
+
+                // Control de multiplicador por Caja Cerrada / Pack
+                const billedQty = ln.billed_qty || ln.quantity;
+                const packVal = ln.pack_size || 1;
+                const packBadgeHtml = `
+                    <div class="d-flex align-items-center justify-content-end gap-1 mt-1" style="font-size:0.71rem;" title="Convertir bultos/cajas cerradas a unidades sueltas de OC sin alterar el subtotal">
+                        <input type="checkbox" class="form-check-input mt-0" ${ln.pack_applied ? 'checked' : ''}
+                            onchange="onToggleOrChangePack(${idx}, this.checked, document.getElementById('pack-inp-${idx}').value)">
+                        <span>📦 x</span>
+                        <input type="number" id="pack-inp-${idx}" step="1" min="1" value="${packVal}"
+                            class="form-control form-control-sm py-0 px-1 text-end" style="width:46px; height:20px; font-size:0.71rem;"
+                            onchange="onToggleOrChangePack(${idx}, ${ln.pack_applied ? 'true' : 'true'}, this.value)">
+                    </div>
+                    ${ln.pack_applied ? `<div class="text-primary" style="font-size:0.70rem;">Fact: ${billedQty} × ${packVal}</div>` : ''}
+                `;
 
                 const poOptions = `<option value="">-- Sin vincular a línea de OC --</option>` + allPOLines.map(pl => `
                     <option value="${pl.po_line_id}" ${ln.matched_po_line_id === pl.po_line_id ? 'selected' : ''}>
@@ -770,7 +815,6 @@
                     </option>
                 `).join('');
 
-                // Mostrar SIEMPRE la alícuota (ej. IVA 21%) en un selector limpio en vez de '1IVA21C'
                 const taxSelect = `
                     <select class="form-select form-select-sm" onchange="state.lines[${idx}].tax_ids = this.value ? [parseInt(this.value)] : []">
                         <option value="">0%</option>
@@ -781,6 +825,7 @@
                     <tr>
                         <td>
                             <div class="fw-semibold small">${ln.product_code ? `<span class="badge bg-secondary me-1">${ln.product_code}</span>` : ''}${ln.description}</div>
+                            ${ln.uom_label ? `<div class="badge bg-light text-dark border mt-1" style="font-size:0.70rem;">${ln.uom_label}</div>` : ''}
                         </td>
                         <td>
                             <select class="form-select form-select-sm" onchange="onChangePOLineMatch(${idx}, this.value)">
@@ -791,10 +836,12 @@
                             <input type="number" step="0.01" class="form-control form-control-sm text-end fw-semibold" value="${ln.quantity}"
                                 onchange="state.lines[${idx}].quantity=parseFloat(this.value||0); renderLinesTable(); updateTotalsSummary();">
                             ${ln.po_qty_pending !== null ? `<div style="font-size:0.72rem;">OC pend: ${ln.po_qty_pending}</div>` : ''}
+                            ${packBadgeHtml}
                         </td>
                         <td class="text-end ${priceClass}">
                             <input type="number" step="0.0001" class="form-control form-control-sm text-end fw-semibold" value="${ln.unit_price}"
                                 onchange="state.lines[${idx}].unit_price=parseFloat(this.value||0); renderLinesTable(); updateTotalsSummary();">
+                            ${origHint}
                             ${priceCompareHint}
                         </td>
                         <td>

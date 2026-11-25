@@ -1637,22 +1637,23 @@ def resolve_secondary_currency_and_rate(
         "rate_source": "pdf",
     }
 
+COMMON_PACK_SIZES = (2, 4, 5, 6, 10, 12, 15, 20, 24, 25, 30, 40, 50, 60, 100, 120, 200, 250, 500, 1000)
+
+
 def auto_match_invoice_lines_to_pos(
     invoice_lines: list,
     purchase_orders: list,
     header: dict = None,
     vat_taxes: list = None,
 ) -> list:
-    """
-    Empareja cada línea de la factura con la línea más parecida de la(s) OC evaluando globalmente:
-    Similitud de código aproximado (peso principal) + Similitud de descripción/medidas + Cantidad pendiente.
-    """
     pool = []
     for po in purchase_orders:
         for pl in po.get("lines", []):
             pool.append(pl)
 
     fallback_vat = _infer_default_vat_tax(header or {}, vat_taxes or [])
+    fallback_lbl = (fallback_vat.get("short_label") or fallback_vat["name"]) if fallback_vat else "Seleccionar IVA"
+
     if not pool:
         return [
             {
@@ -1664,33 +1665,34 @@ def auto_match_invoice_lines_to_pos(
                 "po_qty_pending": None,
                 "po_price_unit": None,
                 "po_discount": None,
+                "po_eff_unit_price": None,
                 "tax_ids": [fallback_vat["id"]] if fallback_vat else [],
-                "tax_names": fallback_vat.get("short_label") or fallback_vat["name"] if fallback_vat else "Seleccionar IVA",
+                "tax_names": fallback_lbl,
                 "match_confidence": 0,
             }
             for inv_ln in invoice_lines
         ]
 
-    # Calcular matriz de puntajes de todos contra todos para elegir el mejor par único sin pisarse
-    candidate_pairs = []
+    comp_rate = float((header or {}).get("comparison_rate") or 1.0)
+    inv_curr = ((header or {}).get("currency") or "ARS").upper()
+
+    candidate_pairs = []  # (score, inv_idx, pl_idx, should_unpack, inferred_pack)
     for inv_idx, inv_ln in enumerate(invoice_lines):
         inv_codes = inv_ln.get("product_codes") or [
             c.strip() for c in re.split(r"[/|;]+", inv_ln.get("product_code") or "") if c.strip()
         ]
         inv_desc = (inv_ln.get("description") or "").strip().lower()
-        inv_qty = float(inv_ln.get("quantity") or 0.0)
-        inv_disc = float(inv_ln.get("discount_percentage") or 0.0)
-        inv_eff_price = float(inv_ln.get("unit_price") or 0.0) * (1.0 - inv_disc / 100.0)
-        comp_rate = float((header or {}).get("comparison_rate") or 1.0)
-        inv_curr = ((header or {}).get("currency") or "ARS").upper()
+        billed_qty = float(inv_ln.get("billed_qty") or inv_ln.get("quantity") or 1.0)
+        explicit_pack = float(inv_ln.get("pack_size") or 1.0)
+        # Subtotal neto fijo de la línea en moneda de la factura
+        line_sub = float(inv_ln.get("line_net_total") or (
+            float(inv_ln.get("quantity") or 1.0) * float(inv_ln.get("unit_price") or 0.0) * (1.0 - float(inv_ln.get("discount_percentage") or 0.0) / 100.0)
+        ))
+        billed_eff_unit = (line_sub / billed_qty) if billed_qty > 0 else 0.0
+        comp_billed_unit = (billed_eff_unit / comp_rate) if (inv_curr == "ARS" and comp_rate > 1.0) else billed_eff_unit
+
         for pl_idx, pl in enumerate(pool):
             pl_desc = f"{pl.get('product_name', '')} {pl.get('description', '')}".strip().lower()
-            pl_eff_price = float(pl["price_unit"] or 0.0) * (1.0 - float(pl.get("discount") or 0.0) / 100.0)
-            comparable_inv_price = (inv_eff_price / comp_rate) if (inv_curr == "ARS" and comp_rate > 1.0) else inv_eff_price
-            price_bonus = 0.0
-            if pl_eff_price > 0 and comparable_inv_price > 0:
-                if abs(comparable_inv_price - pl_eff_price) / pl_eff_price <= 0.04:
-                    price_bonus = 0.14
             code_sim = _score_product_codes(
                 inv_codes=inv_codes,
                 vendor_codes=pl.get("vendor_codes", []),
@@ -1699,44 +1701,93 @@ def auto_match_invoice_lines_to_pos(
             )
             desc_sim = SequenceMatcher(None, inv_desc, pl_desc).ratio() if (inv_desc and pl_desc) else 0.0
 
-            # Comparación de cantidad (muy útil para desempatar cajas 10x10 vs 20x20 o caños de distinta medida)
             ref_qty = pl["qty_pending"] if pl["qty_pending"] > 0 else pl["product_qty"]
-            qty_bonus = 0.0
-            if ref_qty > 0 and inv_qty > 0:
-                if abs(inv_qty - ref_qty) < 0.01:
-                    qty_bonus = 0.18  # Cantidad exacta idéntica
-                elif abs(inv_qty - ref_qty) / max(ref_qty, inv_qty) <= 0.15:
-                    qty_bonus = 0.08
+            # Precio neto efectivo de la OC (considerando descuento cargado en la OC, ej. -37% o -44.79%)
+            pl_eff_unit = float(pl["price_unit"] or 0.0) * (1.0 - float(pl.get("discount") or 0.0) / 100.0)
 
+            # Opción A: Sin multiplicar por pack (1 a 1)
+            qty_bonus_a = 0.0
+            if ref_qty > 0 and billed_qty > 0:
+                if abs(billed_qty - ref_qty) < 0.01:
+                    qty_bonus_a = 0.18
+                elif abs(billed_qty - ref_qty) / max(ref_qty, billed_qty) <= 0.15:
+                    qty_bonus_a = 0.08
 
-            
-            # Comparación de precio neto efectivo (considerando descuento global como el 44.79% de Micro Control)
+            price_bonus_a = 0.0
+            if pl_eff_unit > 0 and comp_billed_unit > 0:
+                if abs(comp_billed_unit - pl_eff_unit) / pl_eff_unit <= 0.04:
+                    price_bonus_a = 0.14
 
-            # Puntaje ponderado final
-            total_score = (code_sim * 0.65) + (desc_sim * 0.25) + qty_bonus + price_bonus
-            candidate_pairs.append((total_score, inv_idx, pl_idx))
+            best_variant_bonus = qty_bonus_a + price_bonus_a
+            use_unpack = False
+            chosen_pack = explicit_pack
 
-    # Ordenar de mayor a menor certeza para asignar primero los cruces más claros (ej. CDT10-034 antes que CDT10)
+            # Opción B: Multiplicando por pack explícito del PDF (ej. 'Caja x 25 unid.' -> 2 * 25 = 50)
+            pack_candidates = [explicit_pack] if explicit_pack > 1.0 else []
+            # Si el PDF no aclaró pack pero la OC pide un múltiplo típico exacto y el código coincide, probar ese múltiplo
+            if not pack_candidates and billed_qty > 0 and ref_qty > billed_qty and code_sim >= 0.68:
+                ratio = round(ref_qty / billed_qty, 4)
+                if any(abs(ratio - cp) < 0.01 for cp in COMMON_PACK_SIZES):
+                    pack_candidates.append(float(round(ratio)))
+
+            for pk in pack_candidates:
+                unpacked_qty = billed_qty * pk
+                comp_unpacked_unit = comp_billed_unit / pk if pk > 0 else comp_billed_unit
+                qb = 0.0
+                if ref_qty > 0:
+                    if abs(unpacked_qty - ref_qty) < 0.01:
+                        qb = 0.20
+                    elif abs(unpacked_qty - ref_qty) / max(ref_qty, unpacked_qty) <= 0.20:
+                        qb = 0.10
+                pb = 0.0
+                if pl_eff_unit > 0 and comp_unpacked_unit > 0:
+                    if abs(comp_unpacked_unit - pl_eff_unit) / pl_eff_unit <= 0.05:
+                        pb = 0.16
+                # Si al desempaquetar mejora claramente la coincidencia de cantidad o precio con la OC, activamos el pack
+                if (qb + pb) > best_variant_bonus and (qb > 0 or pb > 0):
+                    best_variant_bonus = qb + pb
+                    use_unpack = True
+                    chosen_pack = pk
+
+            total_score = (code_sim * 0.65) + (desc_sim * 0.25) + best_variant_bonus
+            candidate_pairs.append((total_score, inv_idx, pl_idx, use_unpack, chosen_pack))
+
     candidate_pairs.sort(key=lambda x: x[0], reverse=True)
 
     assigned_inv = {}
     used_pl = set()
-    for score, inv_idx, pl_idx in candidate_pairs:
+    for score, inv_idx, pl_idx, use_unpack, chosen_pack in candidate_pairs:
         if score < 0.26:
             break
         if inv_idx not in assigned_inv and pl_idx not in used_pl:
-            assigned_inv[inv_idx] = (pool[pl_idx], score)
+            assigned_inv[inv_idx] = (pool[pl_idx], score, use_unpack, chosen_pack)
             used_pl.add(pl_idx)
 
-    # Construir salida respetando el orden original de la factura
     matched_out = []
     for inv_idx, inv_ln in enumerate(invoice_lines):
+        billed_qty = float(inv_ln.get("billed_qty") or inv_ln.get("quantity") or 1.0)
+        line_sub = round(float(inv_ln.get("line_net_total") or (
+            float(inv_ln.get("quantity") or 1.0) * float(inv_ln.get("unit_price") or 0.0) * (1.0 - float(inv_ln.get("discount_percentage") or 0.0) / 100.0)
+        )), 2)
+
         if inv_idx in assigned_inv:
-            best_pl, best_score = assigned_inv[inv_idx]
+            best_pl, best_score, use_unpack, chosen_pack = assigned_inv[inv_idx]
+            eff_qty = round(billed_qty * chosen_pack, 4) if use_unpack else billed_qty
+            eff_unit_price = round(line_sub / eff_qty, 4) if eff_qty > 0 else 0.0
+            pl_eff_unit = round(float(best_pl["price_unit"] or 0.0) * (1.0 - float(best_pl.get("discount") or 0.0) / 100.0), 4)
+
             line_tax_ids = best_pl["tax_ids"] if best_pl["tax_ids"] else ([fallback_vat["id"]] if fallback_vat else [])
-            line_tax_names = best_pl["tax_names"] if best_pl["tax_ids"] else (fallback_vat["name"] if fallback_vat else "Sin IVA")
+            line_tax_names = best_pl["tax_names"] if best_pl["tax_ids"] else fallback_lbl
+
             matched_out.append({
                 **inv_ln,
+                "billed_qty": billed_qty,
+                "pack_size": chosen_pack,
+                "pack_applied": use_unpack,
+                "quantity": eff_qty,
+                "unit_price": eff_unit_price,
+                "discount_percentage": 0.0,
+                "line_net_total": round(eff_qty * eff_unit_price, 2),
                 "matched_po_line_id": best_pl["po_line_id"],
                 "matched_po_name": best_pl["po_name"],
                 "product_id": best_pl["product_id"],
@@ -1744,6 +1795,7 @@ def auto_match_invoice_lines_to_pos(
                 "po_qty_pending": best_pl["qty_pending"],
                 "po_price_unit": best_pl["price_unit"],
                 "po_discount": best_pl["discount"],
+                "po_eff_unit_price": pl_eff_unit,
                 "tax_ids": line_tax_ids,
                 "tax_names": line_tax_names,
                 "match_confidence": round(min(best_score, 1.0) * 100),
@@ -1751,6 +1803,7 @@ def auto_match_invoice_lines_to_pos(
         else:
             matched_out.append({
                 **inv_ln,
+                "billed_qty": billed_qty,
                 "matched_po_line_id": None,
                 "matched_po_name": "",
                 "product_id": None,
@@ -1758,10 +1811,17 @@ def auto_match_invoice_lines_to_pos(
                 "po_qty_pending": None,
                 "po_price_unit": None,
                 "po_discount": None,
+                "po_eff_unit_price": None,
                 "tax_ids": [fallback_vat["id"]] if fallback_vat else [],
-                "tax_names": fallback_vat["name"] if fallback_vat else "Seleccionar IVA",
+                "tax_names": fallback_lbl,
                 "match_confidence": 0,
             })
+
+    # Re-calibrar decimales de unit_price luego de desempaquetar cajas para mantener Neto PDF exacto
+    target_net = float((header or {}).get("net_taxable_base") or 0.0)
+    if target_net > 0:
+        from app.invoice_extractor import calibrate_net_unit_prices
+        matched_out = calibrate_net_unit_prices(matched_out, target_net, price_decimals=4)
 
     return matched_out
 
@@ -1951,6 +2011,100 @@ def _apply_perception_amounts_in_odoo(
     except Exception as exc:
         print(f"[WARN] No se pudo ajustar monto manual de percepción en line_ids: {exc}", flush=True)
 
+def _calibrate_vat_exact_to_pdf(
+    models, db, uid, password, move_id: int, target_vat_pdf: float, valid_perceptions: list, is_refund: bool, ex_rate: float, ctx: dict
+):
+    """Si el IVA calculado por Odoo difiere por centavos respecto al IVA impreso en el PDF, ajusta el apunte de IVA y la cuenta por pagar."""
+    if target_vat_pdf <= 0:
+        return
+    perc_tax_ids = {int(p["tax_id"]) for p in (valid_perceptions or []) if p.get("tax_id")}
+    am_meta = models.execute_kw(db, uid, password, "account.move", "fields_get", [[]], {"attributes": ["type", "relation"]})
+
+    # Caso A: Si existe tabla move_tax_ids (ADHOC l10n_ar_ux)
+    if "move_tax_ids" in am_meta:
+        try:
+            rel_model = am_meta["move_tax_ids"].get("relation") or "account.move.tax"
+            mt_rows = models.execute_kw(
+                db, uid, password, rel_model, "search_read",
+                [[("move_id", "=", int(move_id))]],
+                {"fields": ["id", "tax_id", "tax_amount"], "context": ctx},
+            )
+            vat_rows = [r for r in mt_rows if isinstance(r.get("tax_id"), list) and int(r["tax_id"][0]) not in perc_tax_ids]
+            if vat_rows:
+                curr_vat = round(sum(float(r.get("tax_amount") or 0.0) for r in vat_rows), 2)
+                diff_vat = round(target_vat_pdf - curr_vat, 2)
+                if 0 < abs(diff_vat) <= 25.0:
+                    main_row = max(vat_rows, key=lambda r: float(r.get("tax_amount") or 0.0))
+                    new_amt = round(float(main_row.get("tax_amount") or 0.0) + diff_vat, 2)
+                    models.execute_kw(db, uid, password, rel_model, "write", [[int(main_row["id"])], {"tax_amount": new_amt}], {"context": ctx})
+                    return
+        except Exception:
+            pass
+
+    # Caso B: Ajuste directo sobre account.move.line (Odoo 17/18 estándar)
+    try:
+        move_data = models.execute_kw(
+            db, uid, password, "account.move", "read", [[int(move_id)]],
+            {"fields": ["line_ids", "currency_id", "company_currency_id"], "context": ctx},
+        )[0]
+        amls = models.execute_kw(
+            db, uid, password, "account.move.line", "read", [move_data.get("line_ids") or []],
+            {"fields": ["id", "display_type", "tax_line_id", "account_id", "amount_currency", "balance"], "context": ctx},
+        )
+        doc_curr = move_data["currency_id"][0] if isinstance(move_data.get("currency_id"), list) else None
+        comp_curr = move_data["company_currency_id"][0] if isinstance(move_data.get("company_currency_id"), list) else doc_curr
+        is_foreign = (doc_curr != comp_curr)
+
+        vat_amls = [
+            l for l in amls
+            if isinstance(l.get("tax_line_id"), list) and int(l["tax_line_id"][0]) not in perc_tax_ids
+        ]
+        if not vat_amls:
+            return
+
+        sign = -1.0 if is_refund else 1.0
+        current_vat_curr = round(sum(sign * float(l.get("amount_currency") or 0.0) for l in vat_amls), 2)
+        diff_vat = round(target_vat_pdf - current_vat_curr, 2)
+        if abs(diff_vat) == 0 or abs(diff_vat) > 25.0:
+            return
+
+        acc_ids = list({int(l["account_id"][0]) for l in amls if isinstance(l.get("account_id"), list)})
+        accs = models.execute_kw(db, uid, password, "account.account", "read", [acc_ids], {"fields": ["id", "account_type"], "context": ctx})
+        payable_ids = {int(a["id"]) for a in accs if a.get("account_type") == "liability_payable"}
+        payable_line = next(
+            (l for l in amls if l.get("display_type") == "payment_term" or (isinstance(l.get("account_id"), list) and int(l["account_id"][0]) in payable_ids)),
+            None,
+        )
+        if not payable_line:
+            return
+
+        target_tl = max(vat_amls, key=lambda l: abs(float(l.get("amount_currency") or 0.0)))
+        delta_curr = round(sign * diff_vat, 2)
+        rate_to_use = ex_rate if (is_foreign and ex_rate > 0) else 1.0
+        delta_bal = round(delta_curr * rate_to_use, 2)
+
+        new_tl_curr = round(float(target_tl.get("amount_currency") or 0.0) + delta_curr, 2)
+        new_tl_bal = round(float(target_tl.get("balance") or 0.0) + delta_bal, 2)
+
+        new_pay_curr = round(float(payable_line.get("amount_currency") or 0.0) - delta_curr, 2)
+        new_pay_bal = round(float(payable_line.get("balance") or 0.0) - delta_bal, 2)
+
+        cmds = [
+            (1, int(target_tl["id"]), {
+                "amount_currency": new_tl_curr,
+                "debit": new_tl_bal if new_tl_bal > 0 else 0.0,
+                "credit": abs(new_tl_bal) if new_tl_bal < 0 else 0.0,
+            }),
+            (1, int(payable_line["id"]), {
+                "amount_currency": new_pay_curr,
+                "debit": new_pay_bal if new_pay_bal > 0 else 0.0,
+                "credit": abs(new_pay_bal) if new_pay_bal < 0 else 0.0,
+            }),
+        ]
+        write_ctx = dict(ctx, check_move_validity=False, skip_invoice_sync=True)
+        models.execute_kw(db, uid, password, "account.move", "write", [[int(move_id)], {"line_ids": cmds}], {"context": write_ctx})
+    except Exception as exc:
+        print(f"[WARN] Ajuste fino de IVA omitido: {exc}", flush=True)
 
 def create_draft_vendor_bill(
     company_id: int,
@@ -2013,6 +2167,38 @@ def create_draft_vendor_bill(
     invoice_line_cmds = []
     linked_po_names = set()
     tax_field = "tax_ids" if "tax_ids" in aml_meta else "invoice_line_tax_ids"
+
+    # Determinar precisión real de price_unit en Odoo (ej. 2 o 4 decimales) y cuadrar Neto exacto
+    price_digits = 2
+    try:
+        dp_recs = models.execute_kw(
+            db, uid, password, "decimal.precision", "search_read",
+            [[("name", "=", "Product Price")]], {"fields": ["digits"], "limit": 1, "context": ctx}
+        )
+        if dp_recs and dp_recs[0].get("digits") is not None:
+            price_digits = int(dp_recs[0]["digits"])
+    except Exception:
+        pass
+
+    target_net_pdf = round(float(header.get("net_taxable_base") or 0.0), 2)
+    if target_net_pdf > 0:
+        from app.invoice_extractor import calibrate_net_unit_prices
+        lines = calibrate_net_unit_prices(lines, target_net_pdf, price_decimals=price_digits)
+        current_net_sum = round(sum(round(float(x.get("quantity") or 0) * float(x.get("unit_price") or 0), 2) for x in lines), 2)
+        net_residual = round(target_net_pdf - current_net_sum, 2)
+        # Si Product Price en Odoo tiene 2 decimales y quedó un residuo de ej. $0.03, agregar línea de redondeo neto
+        if abs(net_residual) >= 0.01 and abs(net_residual) <= 50.0:
+            default_line_taxes = [int(t) for t in (lines[0].get("tax_ids") or []) if t]
+            lines.append({
+                "description": "Ajuste por redondeo de precios unitarios",
+                "product_id": None,
+                "purchase_line_id": None,
+                "po_name": "",
+                "quantity": 1.0,
+                "unit_price": net_residual,
+                "discount_percentage": 0.0,
+                "tax_ids": default_line_taxes,
+            })
 
     for idx, ln in enumerate(lines):
         line_taxes = [int(t) for t in (ln.get("tax_ids") or []) if t]
@@ -2134,6 +2320,16 @@ def create_draft_vendor_bill(
     # 6. Inyectar los montos exactos de las percepciones leídas en el PDF
     _apply_perception_amounts_in_odoo(
         models, db, uid, password, int(move_id), valid_perceptions, is_refund, curr_code, ex_rate, ctx
+    )
+
+    # 6b. Ajustar redondeo de IVA para que el IVA Total y el Total del comprobante coincidan al centavo con el PDF
+    _calibrate_vat_exact_to_pdf(
+        models, db, uid, password, int(move_id),
+        target_vat_pdf=round(float(header.get("total_vat") or 0.0), 2),
+        valid_perceptions=valid_perceptions,
+        is_refund=is_refund,
+        ex_rate=ex_rate,
+        ctx=ctx,
     )
 
     # 7. Adjuntar PDF original como documento principal del visor derecho de Odoo

@@ -21,6 +21,14 @@ class ExtractedLineSchema(BaseModel):
         default="",
         description="Descripción limpia del artículo en una sola línea (puedes conservar pulgadas como 1/2\" o 3/4\" sin problemas).",
     )
+    uom_label: str = Field(
+        default="",
+        description="Texto de unidad de medida o presentación si figura (ej: 'Caja x 25 unid.', 'Paq x 20 mts.', 'Rollo x 100m', 'Unitario').",
+    )
+    pack_size: float = Field(
+        default=1.0,
+        description="Cantidad de unidades o metros contenidos por bulto/caja/paquete/rollo si se factura por envase cerrado (ej: 'Caja x 25 unid.' -> 25.0, 'Paq x 20 mts.' -> 20.0, 'Unitario' -> 1.0).",
+    )
     quantity: float = Field(default=1.0, description="Cantidad facturada en la línea.")
     unit_price: float = Field(
         default=0.0,
@@ -96,6 +104,7 @@ Extrae con precisión quirúrgica los datos de la factura de proveedor adjunta r
 5. PRECIO LISTA vs PRECIO NETO BONIFICADO: Si la línea muestra Precio Lista (`17095.25`), `% Bonif` (`-37.00`) y Precio Neto (`10770.01`), pon el Precio Lista (`17095.25`) en `unit_price` y `37.0` (positivo) en `discount_percentage`.
 6. DESCUENTO GLOBAL DE PIE (ej. Micro Control): Si las líneas vienen a precio bruto sin descuento individual pero en el pie se resta un renglón `DESCUENTOS` antes del Subtotal Neto Gravado, coloca ese monto en `global_discount_amount`.
 7. MONEDA REAL Y TC DE REFERENCIA: Si el total final dice `TOTAL PESOS` (aunque mencione una cotización referencial `u$s: 1525.00` en notas), `currency` debe ser `"ARS"`, `exchange_rate` `1.0` y debes guardar `1525.0` en `reference_exchange_rate`. Solo usa `currency = "USD"` cuando la factura esté emitida y totalizada en dólares (en cuyo caso pon el tipo de cambio en `exchange_rate`).
+8. ENVASES CERRADOS / MÚLTIPLOS (`uom_label` y `pack_size`): Presta especial atención a la columna de Unidad de Medida o a la descripción cuando indique bultos cerrados como `Caja x 25 unid.`, `Caja x 50 unid.`, `Paq x 20 mts.`, `Bolsa x 100`, `Rollo x 100m`. Copia ese texto en `uom_label` y coloca el factor multiplicador numérico (`25.0`, `50.0`, `20.0`, `100.0`) en `pack_size`. Si es unitario normal, usa `1.0`.
 """
 CSV_EXPORT_HEADERS = [
     "vendor_name", "vendor_cuit", "document_type", "invoice_letter", "invoice_number",
@@ -200,6 +209,97 @@ def _build_flat_csv(header: dict, lines: list) -> str:
         })
     return buf.getvalue()
 
+def _detect_pack_size(uom_label: str, description: str, gemini_pack: float) -> float:
+    if gemini_pack and gemini_pack > 1.0:
+        return float(gemini_pack)
+    combined = f"{uom_label or ''} {description or ''}"
+    # Detecta 'Caja x 25 unid', 'Paq x 20 mts', 'Pack x 10', 'Rollo x 100 m', 'Bolsas x 50'
+    m = re.search(
+        r"\b(?:caja|paq(?:uete)?|pack|bolsa|rollo|bulto|envase)s?\s*(?:de\s*|x\s*|\*\s*)(\d+(?:[.,]\d+)?)\b",
+        combined,
+        flags=re.IGNORECASE,
+    )
+    if m:
+        val = float(m.group(1).replace(",", "."))
+        if val > 1.0:
+            return val
+    return 1.0
+
+
+def calibrate_net_unit_prices(lines: list, target_net_base: float, price_decimals: int = 4) -> list:
+    """
+    Absorbe cualquier descuento de línea o global dentro de `unit_price` (dejando discount_percentage = 0.0)
+    y calibra los decimales para que sum(round(qty * unit_price, 2)) coincida exactamente con target_net_base.
+    """
+    if not lines:
+        return lines
+
+    base_subs = []
+    for ln in lines:
+        q = float(ln.get("quantity") or 1.0)
+        p = float(ln.get("unit_price") or 0.0)
+        d = float(ln.get("discount_percentage") or 0.0)
+        printed_sub = float(ln.get("line_net_total") or 0.0)
+        calc_sub = round(q * p * (1.0 - d / 100.0), 2)
+        # Respetar el subtotal impreso de la línea (ej. Zoloda 21540.02 en vez de 21540.01) si coincide dentro de $0.05
+        sub = printed_sub if (printed_sub > 0 and abs(printed_sub - calc_sub) <= 0.08) else calc_sub
+        base_subs.append(sub)
+
+    sum_base = round(sum(base_subs), 2)
+    factor = (target_net_base / sum_base) if (target_net_base > 0 and sum_base > 0) else 1.0
+
+    out = []
+    for i, ln in enumerate(lines):
+        q = float(ln.get("quantity") or 1.0)
+        desired_sub = round(base_subs[i] * factor, 2)
+        u_net = round(desired_sub / q, price_decimals) if q > 0 else 0.0
+        actual_sub = round(q * u_net, 2)
+        out.append({
+            **ln,
+            "orig_list_price": ln.get("orig_list_price", float(ln.get("unit_price") or 0.0)),
+            "orig_discount_pct": ln.get("orig_discount_pct", float(ln.get("discount_percentage") or 0.0)),
+            "unit_price": u_net,
+            "discount_percentage": 0.0,
+            "line_net_total": actual_sub,
+        })
+
+    if target_net_base <= 0:
+        return out
+
+    # Ajuste fino del último decimal en una línea cuya cantidad permita absorber centavos residuales
+    unit_step = 10 ** (-price_decimals)
+    for _ in range(200):
+        curr_sum = round(sum(round(float(x["quantity"]) * float(x["unit_price"]), 2) for x in out), 2)
+        diff = round(target_net_base - curr_sum, 2)
+        if abs(diff) < 0.005:
+            break
+        direction = 1 if diff > 0 else -1
+        best_choice = None
+        best_err = abs(diff)
+        for idx, x in enumerate(out):
+            q = float(x["quantity"] or 0.0)
+            if q <= 0:
+                continue
+            cand_u = round(float(x["unit_price"]) + direction * unit_step, price_decimals)
+            if cand_u < 0:
+                continue
+            new_sub = round(q * cand_u, 2)
+            delta_sub = round(new_sub - x["line_net_total"], 2)
+            if delta_sub == 0:
+                continue
+            new_err = abs(round(diff - delta_sub, 2))
+            if new_err < best_err:
+                best_err = new_err
+                best_choice = (idx, cand_u, new_sub)
+                if new_err == 0:
+                    break
+        if best_choice is None:
+            break
+        b_idx, b_u, b_sub = best_choice
+        out[b_idx]["unit_price"] = b_u
+        out[b_idx]["line_net_total"] = b_sub
+
+    return out
 
 def extract_invoice_with_gemini(file_bytes: bytes, mime_type: str) -> dict:
     api_key = os.getenv("GEMINI_API_KEY", "").strip()
@@ -344,7 +444,6 @@ def extract_invoice_with_gemini(file_bytes: bytes, mime_type: str) -> dict:
         disc = abs(float(r.get("discount_percentage") or 0.0))
         net = float(r.get("line_net_total") or round(qty * price * (1.0 - disc / 100.0), 2))
 
-        # Protección anti doble-descuento
         if disc > 0 and qty > 0 and net > 0:
             if abs((qty * price) - net) <= 1.0 and abs((qty * price * (1.0 - disc / 100.0)) - net) > 5.0:
                 disc = 0.0
@@ -354,25 +453,31 @@ def extract_invoice_with_gemini(file_bytes: bytes, mime_type: str) -> dict:
         if len(code_list) == 1 and " / " in raw_pcode:
             code_list = [c.strip() for c in raw_pcode.split(" / ") if c.strip()]
 
+        uom_lbl = (r.get("uom_label") or "").strip()
+        desc_clean = (r.get("description") or "").strip()
+        pack_mult = _detect_pack_size(uom_lbl, desc_clean, float(r.get("pack_size") or 1.0))
+
         lines.append({
             "index": idx,
             "product_code": raw_pcode,
             "product_codes": code_list,
-            "description": (r.get("description") or "").strip(),
+            "description": desc_clean,
+            "uom_label": uom_lbl,
+            "billed_qty": qty,
+            "pack_size": pack_mult,
+            "pack_applied": False,
             "quantity": qty,
+            "orig_list_price": price,
+            "orig_discount_pct": disc,
             "unit_price": price,
             "discount_percentage": disc,
             "line_net_total": net,
         })
 
-    # Prorratear descuento global de pie (ej. Micro Control 44.7851%) cuando las líneas vienen en 0%
-    global_disc = header["global_discount_amount"]
-    sum_lines_gross = sum(l["line_net_total"] for l in lines)
-    if global_disc > 0 and sum_lines_gross > global_disc and all(l["discount_percentage"] == 0.0 for l in lines):
-        exact_disc_pct = round((global_disc / sum_lines_gross) * 100.0, 4)
-        for l in lines:
-            l["discount_percentage"] = exact_disc_pct
-            l["line_net_total"] = round(l["quantity"] * l["unit_price"] * (1.0 - exact_disc_pct / 100.0), 2)
+    # Calibrar todas las líneas a Precio Unitario Neto exacto (discount = 0%) cuadrando con net_taxable_base del PDF
+    target_net = header["net_taxable_base"]
+    if target_net > 0:
+        lines = calibrate_net_unit_prices(lines, target_net, price_decimals=4)
 
     raw_csv = _build_flat_csv(header, lines)
 
