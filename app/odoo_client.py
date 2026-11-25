@@ -1125,6 +1125,11 @@ def _read_purchase_orders_with_lines(models, db, uid, password, po_records: list
             rl = lines_by_id.get(int(lid))
             if not rl or rl.get("display_type"):
                 continue
+            t_labels = []
+            for t in t_list:
+                if t in tax_map:
+                    amt = float(tax_map[t].get("amount") or 0.0)
+                    t_labels.append(f"{amt:g}%" if amt > 0 else (tax_map[t].get("description") or "0%"))
             pid = int(rl["product_id"][0]) if isinstance(rl.get("product_id"), list) else None
             p_info = prod_map.get(pid, {})
             v_codes = list(dict.fromkeys(
@@ -1156,9 +1161,10 @@ def _read_purchase_orders_with_lines(models, db, uid, password, po_records: list
                 "discount": float(rl.get("discount") or 0.0),
                 "price_subtotal": float(rl.get("price_subtotal") or 0.0),
                 "tax_ids": t_list,
-                "tax_names": ", ".join(t_names) if t_names else "Sin IVA",
+                "tax_names": ", ".join(t_labels) if t_labels else "0%",
             })
 
+        curr_id = int(po["currency_id"][0]) if isinstance(po.get("currency_id"), list) else None
         curr_name = po["currency_id"][1] if isinstance(po.get("currency_id"), list) else "ARS"
         partner_name = po["partner_id"][1] if isinstance(po.get("partner_id"), list) else ""
         partner_id = int(po["partner_id"][0]) if isinstance(po.get("partner_id"), list) else None
@@ -1170,6 +1176,7 @@ def _read_purchase_orders_with_lines(models, db, uid, password, po_records: list
             "partner_name": partner_name,
             "partner_ref": po.get("partner_ref") or "",
             "date_order": str(po.get("date_order") or "")[:10],
+            "currency_id": curr_id,
             "currency": curr_name,
             "amount_untaxed": float(po.get("amount_untaxed") or 0.0),
             "amount_tax": float(po.get("amount_tax") or 0.0),
@@ -1324,7 +1331,7 @@ def get_purchase_tax_options(company_id: int, allowed_company_ids: list) -> dict
     _, db, uid, password, models = _get_odoo_service_connection()
     hierarchy_ids = _get_company_hierarchy(models, db, uid, password, int(company_id), allowed_company_ids)
     ctx = _make_company_context(int(company_id), allowed_company_ids)
-
+    
     taxes = models.execute_kw(
         db, uid, password, "account.tax", "search_read",
         [[
@@ -1341,14 +1348,25 @@ def get_purchase_tax_options(company_id: int, allowed_company_ids: list) -> dict
 
     vat_taxes = []
     perception_taxes = []
+    
     for t in taxes:
+        amt_val = float(t.get("amount") or 0.0)
+        if amt_val > 0:
+            short_lbl = f"IVA {amt_val:g}%"
+        elif "exen" in t_name_norm:
+            short_lbl = "Exento (0%)"
+        elif "no grav" in t_name_norm:
+            short_lbl = "No Grav. (0%)"
+        else:
+            short_lbl = "0%"
         grp_name = _strip_accents(t["tax_group_id"][1] if isinstance(t.get("tax_group_id"), list) else "").lower()
         t_name_norm = _strip_accents(t.get("name") or "").lower()
         item = {
             "id": int(t["id"]),
             "name": t["name"],
+            "short_label": short_lbl,
             "description": t.get("description") or t.get("invoice_label") or t["name"],
-            "amount": float(t.get("amount") or 0.0),
+            "amount": amt_val,
         }
         if any(k in t_name_norm or k in grp_name for k in ("perc", "iibb", "ingresos brutos", "ganancia", "adicional")):
             perception_taxes.append(item)
@@ -1495,6 +1513,129 @@ def _score_product_codes(inv_codes: list, vendor_codes: list, internal_code: str
 
     return best
 
+def format_odoo_exception(exc: Exception) -> dict:
+    """Convierte Faults crudos de XML-RPC en mensajes limpios y detecta si hay una factura duplicada."""
+    if isinstance(exc, xmlrpc.client.Fault):
+        msg = exc.faultString or str(exc)
+    else:
+        msg = str(exc)
+        m = re.search(r"<Fault\s+\d+:\s*(['\"])(.*)\1>", msg, flags=re.DOTALL)
+        if m:
+            msg = m.group(2)
+
+    msg = msg.replace("\\n", "\n")
+    # Separar viñetas pegadas (ej. '00240848• Compañía')
+    msg = re.sub(r"([^\n])\s*•", r"\1\n•", msg)
+
+    if "Traceback (most recent call last):" in msg:
+        non_empty = [ln.strip() for ln in msg.strip().splitlines() if ln.strip()]
+        msg = non_empty[-1] if non_empty else msg
+
+    is_duplicate = ("duplicado" in msg.lower()) or ("ya existe un comprobante" in msg.lower())
+    return {"message": msg.strip(), "is_duplicate": is_duplicate}
+
+
+def resolve_secondary_currency_and_rate(
+    company_id: int,
+    allowed_company_ids: list,
+    header: dict,
+    purchase_orders: list,
+) -> dict:
+    """
+    Si la Factura está en ARS y la OC vinculada está en otra moneda (ej. USD):
+    1) Determina move_currency_id = moneda de la OC (USD).
+    2) Si la factura en ARS mencionaba un TC impreso (reference_exchange_rate > 1), usa ese.
+    3) Si no, consulta en Odoo el tipo de cambio inverso (ARS por 1 USD) vigente a la fecha de la factura (invoice_date).
+    """
+    inv_curr = (header.get("currency") or "ARS").upper()
+    if not purchase_orders:
+        return {"secondary_currency": None, "secondary_currency_id": None, "comparison_rate": 1.0, "rate_source": "none"}
+
+    # Buscar si alguna OC asociada tiene moneda distinta a la factura (ej. OC en USD y factura en ARS)
+    po_diff = next((po for po in purchase_orders if (po.get("currency") or "ARS").upper() != inv_curr), None)
+    if not po_diff:
+        return {"secondary_currency": None, "secondary_currency_id": None, "comparison_rate": 1.0, "rate_source": "same_currency"}
+
+    po_curr_code = (po_diff.get("currency") or "USD").upper()
+    po_curr_id = po_diff.get("currency_id")
+
+    # Caso principal: Factura en ARS contra Orden de Compra en USD/EUR
+    if inv_curr == "ARS":
+        # 1° prioridad: TC de referencia impreso en el PDF (ej. Zoloda 'u$s: 1525.0000')
+        pdf_ref_rate = float(header.get("reference_exchange_rate") or 0.0)
+        if pdf_ref_rate > 1.0:
+            return {
+                "secondary_currency": po_curr_code,
+                "secondary_currency_id": po_curr_id,
+                "comparison_rate": round(pdf_ref_rate, 4),
+                "rate_source": "pdf",
+            }
+
+        # 2° prioridad: Consultar TC en Odoo a la fecha de emisión de la factura
+        _, db, uid, password, models = _get_odoo_service_connection()
+        hierarchy_ids = _get_company_hierarchy(models, db, uid, password, int(company_id), allowed_company_ids)
+        ctx = _make_company_context(int(company_id), allowed_company_ids)
+        inv_date = (header.get("invoice_date") or "").strip() or datetime.now(AR_TZ).strftime("%Y-%m-%d")
+
+        if not po_curr_id:
+            currs = models.execute_kw(
+                db, uid, password, "res.currency", "search_read",
+                [[("name", "=", po_curr_code)]], {"fields": ["id"], "limit": 1, "context": ctx}
+            )
+            po_curr_id = int(currs[0]["id"]) if currs else None
+
+        odoo_inv_rate = 0.0
+        if po_curr_id:
+            rate_meta = models.execute_kw(
+                db, uid, password, "res.currency.rate", "fields_get",
+                [["rate", "inverse_company_rate", "company_rate"]], {"attributes": ["type"]}
+            )
+            r_fields = ["name", "rate", "company_id"] + [f for f in ("inverse_company_rate", "company_rate") if f in rate_meta]
+
+            # Buscar cotización <= fecha de factura en la compañía o compañía padre
+            rate_recs = models.execute_kw(
+                db, uid, password, "res.currency.rate", "search_read",
+                [[
+                    ("currency_id", "=", int(po_curr_id)),
+                    ("name", "<=", inv_date),
+                    "|", ("company_id", "=", False), ("company_id", "in", hierarchy_ids),
+                ]],
+                {"fields": r_fields, "order": "name desc, id desc", "limit": 5, "context": ctx},
+            )
+            if not rate_recs:
+                # Si la factura tiene fecha futura sin tasa cargada aún, tomar la última tasa disponible
+                rate_recs = models.execute_kw(
+                    db, uid, password, "res.currency.rate", "search_read",
+                    [[
+                        ("currency_id", "=", int(po_curr_id)),
+                        "|", ("company_id", "=", False), ("company_id", "in", hierarchy_ids),
+                    ]],
+                    {"fields": r_fields, "order": "name desc, id desc", "limit": 1, "context": ctx},
+                )
+
+            if rate_recs:
+                r0 = rate_recs[0]
+                if r0.get("inverse_company_rate") and float(r0["inverse_company_rate"]) > 1.0:
+                    odoo_inv_rate = float(r0["inverse_company_rate"])
+                elif r0.get("rate") and float(r0["rate"]) > 0:
+                    raw_r = float(r0["rate"])
+                    odoo_inv_rate = round(1.0 / raw_r, 4) if raw_r < 1.0 else round(raw_r, 4)
+
+        return {
+            "secondary_currency": po_curr_code,
+            "secondary_currency_id": po_curr_id,
+            "comparison_rate": round(odoo_inv_rate, 4) if odoo_inv_rate > 0 else 1.0,
+            "rate_source": f"odoo ({inv_date})",
+        }
+
+    # Caso inverso: Factura en USD y OC en ARS
+    ex_rate = float(header.get("exchange_rate") or 1.0)
+    return {
+        "secondary_currency": po_curr_code,
+        "secondary_currency_id": po_curr_id,
+        "comparison_rate": ex_rate if ex_rate > 1.0 else 1.0,
+        "rate_source": "pdf",
+    }
 
 def auto_match_invoice_lines_to_pos(
     invoice_lines: list,
@@ -1524,7 +1665,7 @@ def auto_match_invoice_lines_to_pos(
                 "po_price_unit": None,
                 "po_discount": None,
                 "tax_ids": [fallback_vat["id"]] if fallback_vat else [],
-                "tax_names": fallback_vat["name"] if fallback_vat else "Seleccionar IVA",
+                "tax_names": fallback_vat.get("short_label") or fallback_vat["name"] if fallback_vat else "Seleccionar IVA",
                 "match_confidence": 0,
             }
             for inv_ln in invoice_lines
@@ -1540,10 +1681,16 @@ def auto_match_invoice_lines_to_pos(
         inv_qty = float(inv_ln.get("quantity") or 0.0)
         inv_disc = float(inv_ln.get("discount_percentage") or 0.0)
         inv_eff_price = float(inv_ln.get("unit_price") or 0.0) * (1.0 - inv_disc / 100.0)
-
+        comp_rate = float((header or {}).get("comparison_rate") or 1.0)
+        inv_curr = ((header or {}).get("currency") or "ARS").upper()
         for pl_idx, pl in enumerate(pool):
             pl_desc = f"{pl.get('product_name', '')} {pl.get('description', '')}".strip().lower()
-
+            pl_eff_price = float(pl["price_unit"] or 0.0) * (1.0 - float(pl.get("discount") or 0.0) / 100.0)
+            comparable_inv_price = (inv_eff_price / comp_rate) if (inv_curr == "ARS" and comp_rate > 1.0) else inv_eff_price
+            price_bonus = 0.0
+            if pl_eff_price > 0 and comparable_inv_price > 0:
+                if abs(comparable_inv_price - pl_eff_price) / pl_eff_price <= 0.04:
+                    price_bonus = 0.14
             code_sim = _score_product_codes(
                 inv_codes=inv_codes,
                 vendor_codes=pl.get("vendor_codes", []),
@@ -1561,6 +1708,8 @@ def auto_match_invoice_lines_to_pos(
                 elif abs(inv_qty - ref_qty) / max(ref_qty, inv_qty) <= 0.15:
                     qty_bonus = 0.08
 
+
+            
             # Comparación de precio neto efectivo (considerando descuento global como el 44.79% de Micro Control)
             pl_eff_price = float(pl["price_unit"] or 0.0) * (1.0 - float(pl.get("discount") or 0.0) / 100.0)
             price_bonus = 0.0
@@ -1839,7 +1988,15 @@ def create_draft_vendor_bill(
         {"fields": ["id", "name"], "limit": 1, "context": ctx},
     )
     currency_id = int(currs[0]["id"]) if currs else None
+    sec_curr_id = header.get("secondary_currency_id")
+    comp_rate = float(header.get("comparison_rate") or 0.0)
+    if curr_code == "ARS" and sec_curr_id and comp_rate > 1.0:
+        if "move_currency_id" in am_meta:
+            move_vals["move_currency_id"] = int(sec_curr_id)
+        if "move_inverse_currency_rate" in am_meta:
+            move_vals["move_inverse_currency_rate"] = comp_rate
 
+    
     journals = models.execute_kw(
         db, uid, password, "account.journal", "search_read",
         [[("company_id", "=", int(company_id)), ("type", "=", "purchase")]],
@@ -1941,7 +2098,8 @@ def create_draft_vendor_bill(
     if inv_num:
         if "l10n_latam_document_number" in am_meta:
             move_vals["l10n_latam_document_number"] = inv_num
-        move_vals["ref"] = inv_num
+        else:
+            move_vals["ref"] = inv_num
 
     if linked_po_names:
         move_vals["invoice_origin"] = ", ".join(sorted(linked_po_names))

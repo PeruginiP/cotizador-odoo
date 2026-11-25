@@ -61,6 +61,10 @@ class ExtractedInvoiceSchema(BaseModel):
         description="Código ISO de moneda real del total del comprobante: ARS, USD o EUR. Si el pie dice TOTAL PESOS aunque mencione cotización u$s informativa, es ARS."
     )
     exchange_rate: float = Field(default=1.0, description="Tipo de cambio si la factura es en USD/EUR; si currency es ARS colocar 1.0.")
+    reference_exchange_rate: float = Field(
+        default=0.0,
+        description="Si la factura es en ARS (Pesos) pero menciona en el texto o pie una cotización de dólar de referencia (ej: 'u$s: 1525.00', 'TC BNA 1535'), coloca ese valor numérico aquí (ej: 1525.0). Si no menciona ninguno, coloca 0.0.",
+    )
     purchase_order_number: str = Field(
         default="",
         description="Número(s) de Orden de Compra limpios (sin porcentajes ni texto extra; ej: si dice '94076 5%' extraer '94076'). Si hay varios, separar con ' / '.",
@@ -91,8 +95,7 @@ Extrae con precisión quirúrgica los datos de la factura de proveedor adjunta r
 4. COLUMNAS APILADAS Y MÚLTIPLES CÓDIGOS (ej. Zoloda): Si una celda apila dos códigos para el mismo ítem (ej. `ICAB-01/N` arriba y `160.014` abajo), incluye ambos en `product_code` unidos por ` | ` (`"ICAB-01/N | 160.014"`). Atención cuando dos ítems están juntos o una descripción ocupa dos renglones: crea una entrada en `lines` por cada ítem facturado verificando cantidad, precio lista, bonificación y subtotal.
 5. PRECIO LISTA vs PRECIO NETO BONIFICADO: Si la línea muestra Precio Lista (`17095.25`), `% Bonif` (`-37.00`) y Precio Neto (`10770.01`), pon el Precio Lista (`17095.25`) en `unit_price` y `37.0` (positivo) en `discount_percentage`.
 6. DESCUENTO GLOBAL DE PIE (ej. Micro Control): Si las líneas vienen a precio bruto sin descuento individual pero en el pie se resta un renglón `DESCUENTOS` antes del Subtotal Neto Gravado, coloca ese monto en `global_discount_amount`.
-7. MONEDA REAL: Si el total final dice `TOTAL PESOS` (aunque mencione una cotización referencial `u$s` en notas), `currency` debe ser `"ARS"` y `exchange_rate` `1.0`. Solo usa `"USD"` cuando la factura esté emitida y totalizada en dólares."""
-
+7. MONEDA REAL Y TC DE REFERENCIA: Si el total final dice `TOTAL PESOS` (aunque mencione una cotización referencial `u$s: 1525.00` en notas), `currency` debe ser `"ARS"`, `exchange_rate` `1.0` y debes guardar `1525.0` en `reference_exchange_rate`. Solo usa `currency = "USD"` cuando la factura esté emitida y totalizada en dólares (en cuyo caso pon el tipo de cambio en `exchange_rate`).
 
 CSV_EXPORT_HEADERS = [
     "vendor_name", "vendor_cuit", "document_type", "invoice_letter", "invoice_number",
@@ -320,6 +323,7 @@ def extract_invoice_with_gemini(file_bytes: bytes, mime_type: str) -> dict:
         "cae_number": re.sub(r"\D", "", data.get("cae_number") or ""),
         "currency": (data.get("currency") or "ARS").strip().upper(),
         "exchange_rate": float(data.get("exchange_rate") or 1.0),
+        "reference_exchange_rate": float(data.get("reference_exchange_rate") or 0.0),
         "purchase_order_number": " / ".join(po_candidates),
         "po_references": po_candidates,
         "gross_subtotal": float(data.get("gross_subtotal") or 0.0),

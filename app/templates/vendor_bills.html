@@ -179,8 +179,29 @@
 
             <!-- COLUMNA DERECHA: DATOS EXTRAÍDOS, OC Y LÍNEAS -->
             <div class="col-12 col-xl-8">
-                <div id="success-alert"
-                    class="alert alert-success d-none d-flex justify-content-between align-items-center"></div>
+                <div id="success-alert" <!-- ALERTA DE ERROR / DUPLICADO ESTILO ODOO (REEMPLAZA AL ALERT DE CHROME) -->
+                    <div id="error-alert" class="alert alert-danger d-none shadow-sm mb-3"></div>
+
+                    <!-- BANNER MULTIMONEDA (SE ACTIVA SOLO CUANDO FACTURA ES ARS Y OC ES USD) -->
+                    <div id="secondary-currency-bar" class="alert alert-info py-2 px-3 mb-3 d-none shadow-sm">
+                        <div class="d-flex flex-wrap justify-content-between align-items-center gap-2">
+                            <div class="small">
+                                <strong>💱 Conversión Multimoneda activa:</strong>
+                                Factura en <strong id="sec-inv-curr">ARS</strong> contra Orden de Compra en <strong
+                                    id="sec-po-curr">USD</strong>.
+                                <span class="text-muted ms-1" id="sec-rate-source"></span>
+                            </div>
+                            <div class="d-flex align-items-center gap-2">
+                                <label class="small fw-bold mb-0 text-nowrap">TC Referencia
+                                    (`move_inverse_currency_rate`):</label>
+                                <input type="number" step="0.01" id="sec-comp-rate"
+                                    class="form-control form-control-sm text-end fw-bold" style="width: 120px;"
+                                    oninput="onSecondaryRateChange(this.value)">
+                            </div>
+                        </div>
+                    </div>
+                    class="alert alert-success d-none d-flex justify-content-between align-items-center">
+                </div>
 
                 <!-- CABECERA DEL COMPROBANTE + PROVEEDOR -->
                 <div class="odoo-sheet p-3 mb-3 shadow-sm">
@@ -609,6 +630,25 @@
             document.getElementById('hdr-rate').value = h.exchange_rate || 1.0;
             document.getElementById('hdr-cae').value = h.cae_number || '';
             document.getElementById('pdf-po-ref').textContent = h.purchase_order_number || 'Ninguna detectada';
+
+            // Mostrar barra de Moneda Secundaria si la OC está en USD y la factura en ARS
+            const secBar = document.getElementById('secondary-currency-bar');
+            if (h.secondary_currency && h.secondary_currency !== (h.currency || 'ARS')) {
+                secBar.classList.remove('d-none');
+                document.getElementById('sec-inv-curr').textContent = h.currency || 'ARS';
+                document.getElementById('sec-po-curr').textContent = h.secondary_currency;
+                document.getElementById('sec-comp-rate').value = h.comparison_rate || 1.0;
+                const srcLabel = h.rate_source === 'pdf' ? '(leído del PDF)' : `(sistema Odoo: ${h.rate_source || ''})`;
+                document.getElementById('sec-rate-source').textContent = srcLabel;
+            } else {
+                secBar.classList.add('d-none');
+            }
+        }
+
+        function onSecondaryRateChange(val) {
+            const num = parseFloat(val || 0);
+            state.header.comparison_rate = num > 0 ? num : 1.0;
+            renderLinesTable();
         }
 
         function renderPOCards() {
@@ -692,33 +732,47 @@
         function renderLinesTable() {
             const tbody = document.getElementById('lines-tbody');
             const allPOLines = getAllPOLines();
+            const invCurr = (document.getElementById('hdr-currency').value || 'ARS').toUpperCase();
+            const secCurr = state.header.secondary_currency;
+            const compRate = parseFloat(state.header.comparison_rate || 1.0);
+            const useCrossRate = (invCurr === 'ARS' && secCurr && secCurr !== 'ARS' && compRate > 1.0);
 
             tbody.innerHTML = state.lines.map((ln, idx) => {
                 const sub = (ln.quantity * ln.unit_price * (1 - (ln.discount_percentage || 0) / 100));
 
-                // Evaluar semáforos de cantidad y precio contra la OC
+                // Semáforo de cantidad
                 let qtyClass = '';
                 if (ln.po_qty_pending !== null && ln.po_qty_pending !== undefined) {
-                    qtyClass = ln.quantity <= ln.po_qty_pending + 0.001 ? 'diff-ok' : 'diff-err';
+                    qtyClass = ln.quantity <= ln.po_qty_pending + 0.001 ? 'diff-ok' : 'diff-warn';
                 }
+
+                // Semáforo de precio (dividiendo por TC si la factura es ARS y la OC es USD)
                 let priceClass = '';
+                let priceCompareHint = '';
                 if (ln.po_price_unit !== null && ln.po_price_unit > 0) {
-                    const pctDiff = Math.abs(ln.unit_price - ln.po_price_unit) / ln.po_price_unit;
-                    priceClass = pctDiff <= 0.01 ? 'diff-ok' : (pctDiff <= 0.05 ? 'diff-warn' : 'diff-err');
+                    const invComparablePrice = useCrossRate ? (ln.unit_price / compRate) : ln.unit_price;
+                    const pctDiff = Math.abs(invComparablePrice - ln.po_price_unit) / ln.po_price_unit;
+                    priceClass = pctDiff <= 0.015 ? 'diff-ok' : (pctDiff <= 0.05 ? 'diff-warn' : 'diff-err');
+
+                    if (useCrossRate) {
+                        priceCompareHint = `<div style="font-size:0.72rem;">≈ ${secCurr} ${invComparablePrice.toFixed(2)} vs OC ${secCurr} ${ln.po_price_unit}</div>`;
+                    } else {
+                        priceCompareHint = `<div style="font-size:0.72rem;">OC: ${ln.po_price_unit}</div>`;
+                    }
                 }
 
                 const poOptions = `<option value="">-- Sin vincular a línea de OC --</option>` + allPOLines.map(pl => `
                     <option value="${pl.po_line_id}" ${ln.matched_po_line_id === pl.po_line_id ? 'selected' : ''}>
-                        [${pl.po_name}] ${pl.default_code ? '[' + pl.default_code + '] ' : ''}${pl.product_name.substring(0, 42)} (Pend: ${pl.qty_pending} | $${pl.price_unit})
+                        [${pl.po_name}] ${pl.default_code ? '[' + pl.default_code + '] ' : ''}${pl.product_name.substring(0, 42)} (Ped: ${pl.product_qty} | ${pl.price_unit})
                     </option>
                 `).join('');
 
-                const taxSelect = ln.matched_po_line_id
-                    ? `<span class="badge bg-info text-dark">${ln.tax_names || 'IVA de OC'}</span>`
-                    : `<select class="form-select form-select-sm" onchange="state.lines[${idx}].tax_ids = this.value ? [parseInt(this.value)] : []">
-                        <option value="">Sin IVA</option>
-                        ${state.vatTaxes.map(t => `<option value="${t.id}" ${(ln.tax_ids || [])[0] === t.id ? 'selected' : ''}>${t.name}</option>`).join('')}
-                       </select>`;
+                // Mostrar SIEMPRE la alícuota (ej. IVA 21%) en un selector limpio en vez de '1IVA21C'
+                const taxSelect = `
+                    <select class="form-select form-select-sm" onchange="state.lines[${idx}].tax_ids = this.value ? [parseInt(this.value)] : []">
+                        <option value="">0%</option>
+                        ${state.vatTaxes.map(t => `<option value="${t.id}" ${(ln.tax_ids || [])[0] === t.id ? 'selected' : ''}>${t.short_label || (t.amount + '%')}</option>`).join('')}
+                    </select>`;
 
                 return `
                     <tr>
@@ -733,12 +787,12 @@
                         <td class="text-end ${qtyClass}">
                             <input type="number" step="0.01" class="form-control form-control-sm text-end fw-semibold" value="${ln.quantity}"
                                 onchange="state.lines[${idx}].quantity=parseFloat(this.value||0); renderLinesTable(); updateTotalsSummary();">
-                            ${ln.po_qty_pending !== null ? `<div style="font-size:0.73rem;">OC pend: ${ln.po_qty_pending}</div>` : ''}
+                            ${ln.po_qty_pending !== null ? `<div style="font-size:0.72rem;">OC pend: ${ln.po_qty_pending}</div>` : ''}
                         </td>
                         <td class="text-end ${priceClass}">
                             <input type="number" step="0.0001" class="form-control form-control-sm text-end fw-semibold" value="${ln.unit_price}"
                                 onchange="state.lines[${idx}].unit_price=parseFloat(this.value||0); renderLinesTable(); updateTotalsSummary();">
-                            ${ln.po_price_unit !== null ? `<div style="font-size:0.73rem;">OC: ${ln.po_price_unit}</div>` : ''}
+                            ${priceCompareHint}
                         </td>
                         <td>
                             <input type="number" step="0.01" class="form-control form-control-sm text-end" value="${ln.discount_percentage}"
@@ -818,10 +872,18 @@
         }
 
         async function submitDraftBill() {
+            const errBox = document.getElementById('error-alert');
+            const okBox = document.getElementById('success-alert');
+            errBox.classList.add('d-none');
+            okBox.classList.add('d-none');
+
             if (!state.selectedPartnerId) {
-                alert('Seleccioná un proveedor válido de Odoo antes de registrar la factura.');
+                errBox.classList.remove('d-none');
+                errBox.innerHTML = `<strong>Falta proveedor:</strong> Seleccioná un proveedor válido de Odoo en el paso 1 antes de registrar el borrador.`;
+                window.scrollTo({ top: 0, behavior: 'smooth' });
                 return;
             }
+
             const btn = document.getElementById('btn-create-bill');
             btn.disabled = true;
             btn.textContent = 'Creando borrador en Odoo...';
@@ -836,6 +898,7 @@
                 currency: document.getElementById('hdr-currency').value,
                 exchange_rate: parseFloat(document.getElementById('hdr-rate').value || 1.0),
                 cae_number: document.getElementById('hdr-cae').value,
+                comparison_rate: parseFloat(document.getElementById('sec-comp-rate')?.value || state.header.comparison_rate || 1.0),
             };
 
             const payload = {
@@ -865,11 +928,28 @@
                     body: JSON.stringify(payload)
                 });
                 const data = await res.json();
-                if (!res.ok) throw new Error(data.detail || 'No se pudo crear el borrador');
 
-                const alertBox = document.getElementById('success-alert');
-                alertBox.classList.remove('d-none');
-                alertBox.innerHTML = `
+                if (!res.ok) {
+                    const formattedLines = (data.detail || 'No se pudo crear el borrador')
+                        .split('\n')
+                        .map(line => line.trim())
+                        .filter(Boolean)
+                        .map((line, idx) => idx === 0 ? `<div class="fw-bold mb-1">⚠️ ${line}</div>` : `<div class="small ms-2">${line}</div>`)
+                        .join('');
+
+                    const openBtn = data.existing_link
+                        ? `<div class="mt-2"><a href="${data.existing_link}" target="_blank" class="btn btn-sm btn-outline-danger fw-semibold">Ver comprobante existente en Odoo ↗</a></div>`
+                        : '';
+
+                    errBox.className = data.is_duplicate ? 'alert alert-warning border-warning shadow-sm mb-3' : 'alert alert-danger shadow-sm mb-3';
+                    errBox.innerHTML = formattedLines + openBtn;
+                    errBox.classList.remove('d-none');
+                    window.scrollTo({ top: 0, behavior: 'smooth' });
+                    return;
+                }
+
+                okBox.classList.remove('d-none');
+                okBox.innerHTML = `
                     <div>
                         <strong>✓ Factura registrada en Borrador en Odoo:</strong> ${data.move_name} (${data.ref}) — Total calculado en Odoo: ${headerPayload.currency} ${data.amount_total.toLocaleString('es-AR', { minimumFractionDigits: 2 })}
                     </div>
@@ -877,7 +957,10 @@
                 `;
                 window.scrollTo({ top: 0, behavior: 'smooth' });
             } catch (err) {
-                alert('Error: ' + err.message);
+                errBox.className = 'alert alert-danger shadow-sm mb-3';
+                errBox.innerHTML = `<strong>Error de conexión:</strong> ${err.message}`;
+                errBox.classList.remove('d-none');
+                window.scrollTo({ top: 0, behavior: 'smooth' });
             } finally {
                 btn.disabled = false;
                 btn.textContent = 'Registrar Factura en Borrador en Odoo';

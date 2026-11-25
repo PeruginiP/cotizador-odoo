@@ -1,6 +1,7 @@
 import os
 import time
 import base64
+import re
 import threading
 from fastapi import FastAPI, Request, Form, HTTPException, Depends, UploadFile, File
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
@@ -41,6 +42,9 @@ from app.odoo_client import (
     auto_match_invoice_lines_to_pos,
     match_extracted_perceptions_to_odoo,
     create_draft_vendor_bill,
+    resolve_secondary_currency_and_rate,
+    format_odoo_exception,
+    _get_odoo_service_connection,
 )
 
 load_dotenv()
@@ -484,7 +488,8 @@ async def api_extract_vendor_bill(
 
         # 3. Traer impuestos activos de compra de la empresa en Odoo
         tax_opts = get_purchase_tax_options(company_id, allowed)
-
+        sec_info = resolve_secondary_currency_and_rate(company_id, allowed, header, purchase_orders)  # (usar payload.company_id en rematch)
+        header.update(sec_info)
         # 4. Cruzar líneas de factura vs OC (con inferencia automática de ej. 1IVA21C si falta)
         matched_lines = auto_match_invoice_lines_to_pos(
             extracted["lines"],
@@ -575,6 +580,8 @@ def api_rematch_vendor_bill(payload: RematchBillIn, user: dict = Depends(get_cur
 
         # 3. Impuestos y re-cruce de líneas y percepciones
         tax_opts = get_purchase_tax_options(payload.company_id, allowed)
+        sec_info = resolve_secondary_currency_and_rate(company_id, allowed, header, purchase_orders)  # (usar payload.company_id en rematch)
+        header.update(sec_info)
         matched_lines = auto_match_invoice_lines_to_pos(
             payload.lines,
             purchase_orders,
@@ -669,4 +676,30 @@ def api_create_draft_bill(payload: CreateDraftBillIn, user: dict = Depends(get_c
         )
         return JSONResponse({"ok": True, **res})
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error al crear factura en Odoo: {str(e)}")
+     err_info = format_odoo_exception(e)
+     existing_link = None
+     if err_info["is_duplicate"]:
+         try:
+             # Intentar localizar la factura existente para ofrecer botón 'Abrir en Odoo'
+             _, db, uid, password, models = _get_odoo_service_connection()
+             inv_n = (payload.header.get("invoice_number") or "").strip()
+             if inv_n:
+                 found = models.execute_kw(
+                     db, uid, password, "account.move", "search_read",
+                     [[("company_id", "=", payload.company_id), ("partner_id", "child_of", payload.partner_id), ("name", "ilike", inv_n)]],
+                     {"fields": ["id", "name"], "limit": 1},
+                 )
+                 if found:
+                     base_u = os.getenv("ODOO_URL", "").rstrip("/")
+                     existing_link = f"{base_u}/web#id={found[0]['id']}&model=account.move&view_type=form"
+         except Exception:
+             pass
+     return JSONResponse(
+         status_code=409 if err_info["is_duplicate"] else 400,
+         content={
+             "ok": False,
+             "detail": err_info["message"],
+             "is_duplicate": err_info["is_duplicate"],
+             "existing_link": existing_link,
+         },
+     )
