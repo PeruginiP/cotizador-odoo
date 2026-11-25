@@ -520,6 +520,84 @@ async def api_extract_vendor_bill(
         err_msg = str(e).strip() or repr(e)
         raise HTTPException(status_code=500, detail=f"Error al procesar la factura ({type(e).__name__}): {err_msg}")
 
+class RematchBillIn(BaseModel):
+    company_id: int
+    partner_id: Optional[int] = None
+    header: dict
+    lines: List[dict]
+
+
+@app.post("/api/vendor-bills/rematch")
+def api_rematch_vendor_bill(payload: RematchBillIn, user: dict = Depends(get_current_user)):
+    """Re-ejecuta la búsqueda de Proveedor, OC, códigos supplierinfo e impuestos en Odoo SIN llamar a Gemini (0 tokens)."""
+    allowed = validate_user_company(user, payload.company_id)
+    try:
+        header = payload.header or {}
+
+        # 1. Resolver proveedor (usar el elegido manualmente si viene, o volver a buscar por CUIT/Nombre)
+        vendor = None
+        if payload.partner_id:
+            card = get_single_partner_card(payload.partner_id, payload.company_id, allowed)
+            vendor = {"id": card["id"], "name": card["name"], "vat": card.get("vat") or ""}
+        else:
+            vendor = find_vendor_by_cuit_or_name(
+                cuit=header.get("vendor_cuit", ""),
+                name=header.get("vendor_name", ""),
+                company_id=payload.company_id,
+                allowed_company_ids=allowed,
+            )
+
+        partner_id = vendor["id"] if vendor else None
+
+        # Reconstruir lista de referencias de OC desde el texto actual
+        raw_po_str = header.get("purchase_order_number") or ""
+        po_refs = [
+            re.sub(r"\s+\d+(?:[.,]\d+)?\s*%.*$", "", t.strip()).strip()
+            for t in re.split(r"[/,;]+", raw_po_str)
+            if t.strip()
+        ]
+        header["po_references"] = po_refs
+
+        # 2. Buscar OC en Odoo
+        purchase_orders = search_purchase_orders_for_bill(
+            company_id=payload.company_id,
+            allowed_company_ids=allowed,
+            po_references=po_refs,
+            partner_id=partner_id,
+        )
+
+        if not vendor and purchase_orders and purchase_orders[0].get("partner_id"):
+            vendor = {
+                "id": purchase_orders[0]["partner_id"],
+                "name": purchase_orders[0]["partner_name"],
+                "vat": header.get("vendor_cuit", ""),
+            }
+
+        # 3. Impuestos y re-cruce de líneas y percepciones
+        tax_opts = get_purchase_tax_options(payload.company_id, allowed)
+        matched_lines = auto_match_invoice_lines_to_pos(
+            payload.lines,
+            purchase_orders,
+            header=header,
+            vat_taxes=tax_opts.get("vat_taxes", []),
+        )
+        matched_perceptions = match_extracted_perceptions_to_odoo(
+            header.get("parsed_perceptions", []),
+            tax_opts.get("perception_taxes", []),
+        )
+        header["parsed_perceptions"] = matched_perceptions
+
+        return JSONResponse({
+            "ok": True,
+            "header": header,
+            "vendor": vendor,
+            "purchase_orders": purchase_orders,
+            "lines": matched_lines,
+        })
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Error al re-cruzar contra Odoo ({type(e).__name__}): {str(e) or repr(e)}")
 
 @app.get("/api/vendor-bills/purchase-orders")
 def api_search_pos_manual(

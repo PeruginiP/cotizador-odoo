@@ -27,15 +27,15 @@ Eres un especialista en extracción de datos contables argentinos (normativa AFI
 4. **DESCUENTO GLOBAL EN PIE DE PÁGINA (`global_discount_amount`):**
    - Si las líneas no tienen descuento individual (`0.0`), pero en el pie antes del SUBTOTAL / IVA hay un renglón `DESCUENTOS` (ej: `DESCUENTOS $ 11,751,864.46` / `44.79%`), coloca ese monto exacto (`11751864.46`) en `global_discount_amount` y coloca la suma bruta de líneas en `gross_subtotal` y el subtotal restado en `net_taxable_base`.
 
-5. **TRATAMIENTO DE LÍNEAS, CÓDIGOS Y PRECIOS (SIN IVA):**
-   - Crea una fila en el CSV por cada línea de producto/servicio facturado. Ignora líneas meramente informativas ("Son pesos...", despachos de importación, textos legales) salvo que aporten el número de OC.
-   - En `product_code`, extrae todos los códigos de artículo del proveedor visibles en esa línea (si hay más de uno, únelos con ` / `).
-   - En Facturas "A" o "M", extrae precios unitarios y subtotales de línea **NETOS (sin IVA)**. Si el proveedor no detalla alícuota de IVA por línea, NO la inventes.
+5. **TRATAMIENTO DE COLUMNAS APILADAS, CÓDIGOS Y PRECIOS (CASO ZOLODA Y SIMILARES):**
+   - Algunos proveedores apilan varios datos en una misma celda (ej: Código alfanumérico `D-BPSN-04-CR` arriba y código numérico `097.018` abajo; o Precio Neto, `% Bonif -37.00` y `Nro. OC 93841` en la misma columna). Lee con cuidado a qué fila pertenece cada ítem, incluso si una descripción ocupa dos renglones.
+   - **Múltiples códigos (`product_code`):** Si el ítem tiene dos códigos (ej: `ICAB-01/N` y debajo `160.014`), extrae AMBOS unidos por ` | ` (barra vertical, ej: `"ICAB-01/N | 160.014"`). NO uses `/` como separador porque algunos códigos reales contienen barras internas.
+   - **Precio Lista vs. Precio Neto con Bonificación:** Si la factura muestra tanto `PRECIO LISTA` (ej: `17095.25`), `% BONIF` (ej: `-37.00`) y `PRECIO NETO` ya bonificado (ej: `10770.01`): coloca el **PRECIO LISTA** (`17095.25`) en `unit_price` y el porcentaje positivo (`37.0`) en `discount_percentage` (para que `17095.25 * (1 - 0.37) = 10770.01` y no se descuente dos veces).
+   - **Moneda real del comprobante (`currency`):** Si el pie dice `TOTAL PESOS` (y los precios coinciden con ese total en pesos) aunque mencione una cotización referencial `u$s: 1525.00`, la moneda del comprobante es **`ARS`** y `exchange_rate` es **`1.0`**. Solo usa `USD` si el comprobante está emitido y totalizado en dólares.
 
 6. **DESCUENTOS E IMPUESTOS DE PIE DE FACTURA:**
-   - `discount_percentage`: Descuento porcentual de esa fila. Si hay cascada (ej: 10% + 5%), calcula el equivalente único (`14.5`).
-   - Separa claramente el IVA total (`total_vat`) de percepciones y otros tributos (`other_taxes_perceptions`).
-   - En `perceptions_detail`, usa SIEMPRE el separador ` | ` (barra vertical) entre cada percepción.
+   - `discount_percentage`: Siempre positivo de 0 a 100 (si dice `-37.00`, escribe `37.0`).
+   - Separa el IVA total (`total_vat`) de percepciones (`other_taxes_perceptions`). En `perceptions_detail`, usa ` | ` entre percepciones solo para aquellas cuyo monto sea mayor a `0.0`.
 
 7. **REGLAS DE FORMATO TÉCNICO:**
    - **Estructura Plana:** Repite los datos de cabecera y totales de pie en todas las filas del mismo comprobante.
@@ -268,10 +268,21 @@ def extract_invoice_with_gemini(file_bytes: bytes, mime_type: str) -> dict:
     for idx, r in enumerate(rows):
         qty = _safe_float(r.get("quantity"), 1.0)
         price = _safe_float(r.get("unit_price"), 0.0)
-        disc = _safe_float(r.get("discount_percentage"), 0.0)
+        disc = abs(_safe_float(r.get("discount_percentage"), 0.0))  # Convierte -37.00 en 37.0
         net = _safe_float(r.get("line_net_total"), round(qty * price * (1.0 - disc / 100.0), 2))
+
+        # Protección anti doble-descuento: si Gemini puso el precio YA bonificado en unit_price y además puso 37% en disc
+        if disc > 0 and qty > 0 and net > 0:
+            if abs((qty * price) - net) <= 1.0 and abs((qty * price * (1.0 - disc / 100.0)) - net) > 5.0:
+                # unit_price ya era el neto bonificado -> ponemos disc = 0.0 para no descontar dos veces
+                disc = 0.0
+
         raw_pcode = (r.get("product_code") or "").strip()
-        code_list = [c.strip() for c in re.split(r"[/|;]+", raw_pcode) if c.strip()]
+        # Separar múltiples códigos por '|' o ';' o salto de espacio doble, SIN romper barras internas como 'ICAB-01/N'
+        code_list = [c.strip() for c in re.split(r"\s*[|;]\s*|\s{2,}", raw_pcode) if c.strip()]
+        if len(code_list) == 1 and " / " in raw_pcode:  # solo si tiene espacios a ambos lados ' / '
+            code_list = [c.strip() for c in raw_pcode.split(" / ") if c.strip()]
+
         lines.append({
             "index": idx,
             "product_code": raw_pcode,
