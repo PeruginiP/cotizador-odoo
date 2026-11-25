@@ -2175,33 +2175,9 @@ def create_draft_vendor_bill(
         if dp_recs and dp_recs[0].get("digits") is not None:
             price_digits = int(dp_recs[0]["digits"])
     except Exception:
-        pass
+        pass    
 
-    target_net_pdf = round(float(header.get("net_taxable_base") or 0.0), 2)
-    if target_net_pdf > 0 and lines:
-        odoo_simulated_net = round(sum(
-            round(
-                float(x.get("quantity") or 0.0)
-                * round(float(x.get("unit_price") or 0.0), price_digits)
-                * (1.0 - round(float(x.get("discount_percentage") or 0.0), 2) / 100.0),
-                2,
-            )
-            for x in lines
-        ), 2)
-        net_residual = round(target_net_pdf - odoo_simulated_net, 2)
-        # Si difiere por centavos o por truncamiento de 2 decimales de descuento (hasta un 2% del neto), agregar ajuste al final
-        if abs(net_residual) >= 0.01 and abs(net_residual) <= max(50.0, target_net_pdf * 0.02):
-            default_line_taxes = [int(t) for t in (lines[0].get("tax_ids") or []) if t]
-            lines.append({
-                "description": "Ajuste por redondeo / decimales de bonificación",
-                "product_id": None,
-                "purchase_line_id": None,
-                "po_name": "",
-                "quantity": 1.0,
-                "unit_price": net_residual,
-                "discount_percentage": 0.0,
-                "tax_ids": default_line_taxes,
-            })
+    
 
     for idx, ln in enumerate(lines):
         line_taxes = [int(t) for t in (ln.get("tax_ids") or []) if t]
@@ -2325,15 +2301,78 @@ def create_draft_vendor_bill(
         models, db, uid, password, int(move_id), valid_perceptions, is_refund, curr_code, ex_rate, ctx
     )
 
-    # 6b. Ajustar redondeo de IVA para que el IVA Total y el Total del comprobante coincidan al centavo con el PDF
-    _calibrate_vat_exact_to_pdf(
-        models, db, uid, password, int(move_id),
-        target_vat_pdf=round(float(header.get("total_vat") or 0.0), 2),
-        valid_perceptions=valid_perceptions,
-        is_refund=is_refund,
-        ex_rate=ex_rate,
-        ctx=ctx,
-    )
+    # 6b. Ajuste automático de Total General: comparar amount_total real en Odoo vs Total del Comprobante PDF
+    # y agregar una línea por (diferencia_total / 1.21) con IVA 21% para que el Total General coincida al centavo.
+    target_total_pdf = round(float(header.get("total_amount") or 0.0), 2)
+    if target_total_pdf > 0:
+        curr_move = models.execute_kw(
+            db, uid, password, "account.move", "read",
+            [[int(move_id)]],
+            {"fields": ["amount_total", "amount_untaxed", "amount_tax"], "context": ctx},
+        )[0]
+        odoo_total_now = round(float(curr_move.get("amount_total") or 0.0), 2)
+        diff_total = round(target_total_pdf - odoo_total_now, 2)
+
+        if abs(diff_total) >= 0.01:
+            # Buscar el impuesto IVA 21% de compras en esta compañía (preferir el ya usado en las líneas)
+            vat21_id = None
+            all_used_tids = list({int(t) for ln in lines for t in (ln.get("tax_ids") or []) if t and int(t) not in perc_tax_ids})
+            if all_used_tids:
+                used_tax_recs = models.execute_kw(
+                    db, uid, password, "account.tax", "read", [all_used_tids],
+                    {"fields": ["id", "amount"], "context": ctx},
+                )
+                t21 = next((r for r in used_tax_recs if abs(float(r.get("amount") or 0.0) - 21.0) < 0.1), None)
+                if t21:
+                    vat21_id = int(t21["id"])
+
+            if not vat21_id:
+                hierarchy_ids = _get_company_hierarchy(models, db, uid, password, int(company_id), allowed_company_ids)
+                found_t21 = models.execute_kw(
+                    db, uid, password, "account.tax", "search_read",
+                    [[
+                        ("type_tax_use", "=", "purchase"),
+                        ("active", "=", True),
+                        ("amount", "=", 21.0),
+                        "|", ("company_id", "=", False), ("company_id", "in", hierarchy_ids),
+                    ]],
+                    {"fields": ["id"], "limit": 1, "context": ctx},
+                )
+                if found_t21:
+                    vat21_id = int(found_t21[0]["id"])
+
+            if vat21_id:
+                raw_adj_net = round(diff_total / 1.21, 2)
+                # Probar el centavo exacto por si al multiplicar x1.21 en Odoo el redondeo se desplaza $0.01
+                adj_vals = {
+                    "sequence": 999,
+                    "name": "Ajuste por redondeo",
+                    "quantity": 1.0,
+                    "price_unit": raw_adj_net,
+                    tax_field: [(6, 0, [vat21_id])],
+                }
+                models.execute_kw(
+                    db, uid, password, "account.move", "write",
+                    [[int(move_id)], {"invoice_line_ids": [(0, 0, adj_vals)]}],
+                    {"context": ctx},
+                )
+
+                # Verificar si por redondeo del 21% quedó a +/- $0.01 del Total General y afinar ese centavo si hace falta
+                recheck = models.execute_kw(
+                    db, uid, password, "account.move", "read",
+                    [[int(move_id)]],
+                    {"fields": ["amount_total", "invoice_line_ids"], "context": ctx},
+                )[0]
+                rem_diff = round(target_total_pdf - float(recheck.get("amount_total") or 0.0), 2)
+                if abs(rem_diff) in (0.01, 0.02) and recheck.get("invoice_line_ids"):
+                    last_aml_id = int(recheck["invoice_line_ids"][-1])
+                    fine_price = round(raw_adj_net + (0.01 if rem_diff > 0 else -0.01), 2)
+                    models.execute_kw(
+                        db, uid, password, "account.move", "write",
+                        [[int(move_id)], {"invoice_line_ids": [(1, last_aml_id, {"price_unit": fine_price})]}],
+                        {"context": ctx},
+                    )
+    
 
     # 7. Adjuntar PDF original como documento principal del visor derecho de Odoo
     if attachment_b64 and attachment_filename:
