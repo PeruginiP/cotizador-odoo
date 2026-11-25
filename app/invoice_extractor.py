@@ -3,39 +3,105 @@ import io
 import os
 import re
 import time
+from datetime import datetime, timedelta
 from google import genai
 from google.genai import types
 from google.genai import errors as genai_errors
 
-SYSTEM_PROMPT = """# ROL Y OBJETIVO
+SYSTEM_PROMPT = """
+# ROL Y OBJETIVO
 Eres un especialista en extracción de datos contables argentinos (normativa AFIP/ARCA) e integración ERP con Odoo. Tu tarea es extraer datos de facturas de proveedores y estructurarlos en un formato CSV estricto, diseñado para conciliar facturas contra Órdenes de Compra (OC) preexistentes en Odoo.
 
 # REGLAS CRÍTICAS DE NEGOCIO Y EXTRACCIÓN
+
 1. **EMISOR vs. RECEPTOR:**
    - Extrae únicamente los datos fiscales del **EMISOR** (proveedor, ubicado generalmente en el cuadrante superior izquierdo).
    - Ignora por completo el CUIT y razón social del receptor/cliente ("Señor/es", "Destinatario").
-2. **BÚSQUEDA EXHAUSTIVA DE ORDEN DE COMPRA (`purchase_order_number`):**
-   - Búscalo en campos dedicados ("Orden de Compra", "O.C.", "Ref. Cliente", "Pedido") y también dentro de textos libres, notas al pie, remitos o descripción de líneas (ej: "S/OC 4502", "PO00123", "93757").
-   - Extrae únicamente el identificador limpio. Si hay múltiples OC, sepáralas con barra (`/`). Si no existe, deja el campo vacío.
-3. **TRATAMIENTO DE LÍNEAS Y PRECIOS (SIN IVA):**
-   - Crea una fila en el CSV por cada línea de producto/servicio facturado. Ignora líneas meramente informativas salvo que contengan la OC.
-   - En Facturas "A" o "M", extrae precios unitarios y subtotales **NETOS (sin IVA)**. No inventes alícuotas por línea.
-4. **DESCUENTOS (LÍNEA vs. PIE DE PÁGINA):**
-   - `discount_percentage`: Solo descuentos de esa fila (si hay cascada ej. 10%+5%, calcula el equivalente único `14.5`).
-   - `global_discount_amount`: Descuentos globales en el pie antes de impuestos como positivo (ej: `1500.00`), o `0.0`.
-5. **IMPUESTOS Y PERCEPCIONES (PIE DE FACTURA):**
-   - Separa el IVA total (`total_vat`) de otros tributos/percepciones (`other_taxes_perceptions`).
-6. **REGLAS DE FORMATO TÉCNICO:**
-   - Repite los datos de cabecera y pie en todas las filas del mismo comprobante.
-   - Números Float con punto decimal (`.`), sin separador de miles ni símbolo de moneda. Nulos: `0.0`.
-   - Fechas ISO `YYYY-MM-DD`.
-   - `invoice_number`: 5 dígitos punto de venta + guion + 8 dígitos número (ej: `00004-00011848`).
-   - Delimitador coma (`,`). Encierra SIEMPRE entre comillas dobles (`"..."`) `vendor_name`, `description` y `perceptions_detail`. Reemplaza comillas dobles internas por simples (`'`).
-   - Devuelve ÚNICAMENTE texto plano CSV sin bloques Markdown.
+
+2. **VENCIMIENTO DE PAGO vs. VENCIMIENTO DE CAE (¡PROHIBIDO CONFUNDIRLOS!):**
+   - **PROHIBICIÓN ESTRICTA:** En el pie de las facturas argentinas siempre figura *"Fecha de Vto. de CAE"* o *"Vto. CAE"* junto al número de CAE (suele ser 10 días posterior a la emisión). **JAMÁS** uses la fecha de vencimiento del CAE como `due_date`.
+   - Busca `due_date` únicamente en el encabezado comercial ("Fecha de Vencimiento", "Vto. Pago", "Vence").
+   - Busca `payment_terms` en "Condición de Venta", "Cond. Pago" o notas comerciales (ej: `"30 días Fecha Factura"`, `"Contado"`, `"30/60 días"`, `"Cta. Cte. 45 días"`).
+   - Si NO existe una fecha de vencimiento de pago explícita:
+     * Si `payment_terms` indica una cantidad única y exacta de días corridos desde la fecha de factura (ej: "30 días FF", "A 15 días", "30 días fecha factura"), calcula `due_date` sumando esos días a `invoice_date`.
+     * Si dice simplemente "Cuenta Corriente", varios plazos ("30/60/90") o no especifica días ni fecha comercial, deja `due_date` **COMPLETAMENTE VACÍO**.
+
+3. **BÚSQUEDA EXHAUSTIVA DE ORDEN DE COMPRA (`purchase_order_number`):**
+   - Búscalo en campos dedicados ("Orden de Compra", "O.C.", "Ref. Cliente", "Nota de Pedido") y también dentro de observaciones, remitos asociados o en las líneas de descripción (ej: "S/OC 93757", "PO00123", "OC #4502").
+   - Extrae únicamente el identificador limpio (ej: `93757` o `P00452`). Si hay múltiples OC, sepáralas con ` / `. Si no existe, deja el campo vacío.
+
+4. **CÓDIGOS DE PRODUCTO MÚLTIPLES (`product_code`):**
+   - Un proveedor puede informar más de un código para la misma línea (ej: columna "Código" + columna "Cód. Fábrica/EAN", o un código en la columna de código y otro código/referencia al inicio o final de la descripción).
+   - Extrae **TODOS** los códigos de artículo del proveedor presentes en esa línea separados por ` / ` (ej: `"JPF100025CXR / 100025"`). No incluyas unidades de medida ni cantidades como códigos. Si no hay ningún código, deja vacío.
+
+5. **TRATAMIENTO DE LÍNEAS Y PRECIOS (SIN IVA):**
+   - Crea una fila en el CSV por cada línea de producto/servicio facturado. Ignora líneas meramente informativas ("Son pesos...", textos legales) salvo que aporten el número de OC.
+   - En Facturas "A" o "M", extrae precios unitarios y subtotales de línea **NETOS (sin IVA)**. Si el proveedor no detalla alícuota de IVA por línea, NO la inventes.
+
+6. **DESCUENTOS E IMPUESTOS DE PIE DE FACTURA:**
+   - `discount_percentage`: Descuento porcentual de esa fila. Si hay cascada (ej: 10% + 5%), calcula el equivalente único (`14.5`).
+   - `global_discount_amount`: Descuento global en el pie antes de impuestos como positivo (`0.0` si no hay).
+   - Separa claramente el IVA total (`total_vat`) de percepciones y otros tributos (`other_taxes_perceptions`).
+   - En `perceptions_detail`, usa SIEMPRE el separador ` | ` (barra vertical) entre cada percepción.
+
+7. **REGLAS DE FORMATO TÉCNICO:**
+   - **Estructura Plana:** Repite los datos de cabecera y totales de pie en todas las filas del mismo comprobante.
+   - **Números (Float):** Punto (`.`) como separador decimal, sin separador de miles ni símbolos de moneda (`1234.56`). Nulos numéricos: `0.0`.
+   - **Fechas:** Formato ISO estricto `YYYY-MM-DD`.
+   - **Comprobante Odoo AR (`invoice_number`):** Formatea SIEMPRE con ceros a la izquierda: **5 dígitos** punto de venta + guion + **8 dígitos** número (ej: si dice `0033-00048461`, escribe `00033-00048461`).
+   - **Texto y CSV:** Delimitador coma (`,`). Encierra SIEMPRE entre comillas dobles (`"..."`) `vendor_name`, `payment_terms`, `product_code`, `description` y `perceptions_detail`. Reemplaza comillas dobles internas por simples (`'`).
+   - **Salida Pura:** Devuelve ÚNICAMENTE el texto plano del CSV, sin bloques ```csv ni explicaciones.
 
 # ESTRUCTURA CSV REQUERIDA (CABECERAS EXACTAS EN FILA 1)
-vendor_name,vendor_cuit,document_type,invoice_letter,invoice_number,invoice_date,due_date,cae_number,currency,exchange_rate,purchase_order_number,product_code,description,quantity,unit_price,discount_percentage,line_net_total,gross_subtotal,global_discount_amount,net_taxable_base,exempt_amount,total_vat,other_taxes_perceptions,perceptions_detail,total_amount"""
+vendor_name,vendor_cuit,document_type,invoice_letter,invoice_number,invoice_date,due_date,payment_terms,cae_number,currency,exchange_rate,purchase_order_number,product_code,description,quantity,unit_price,discount_percentage,line_net_total,gross_subtotal,global_discount_amount,net_taxable_base,exempt_amount,total_vat,other_taxes_perceptions,perceptions_detail,total_amount
 
+# DICCIONARIO DE DATOS
+- `vendor_name`: Razón social del proveedor emisor (entre comillas dobles).
+- `vendor_cuit`: CUIT del emisor con guiones (`XX-XXXXXXXX-X`).
+- `document_type`: `FACTURA`, `NOTA_CREDITO` o `NOTA_DEBITO`.
+- `invoice_letter`: `A`, `B`, `C`, `M` o `E`.
+- `invoice_number`: 5 dígitos PV + `-` + 8 dígitos número (`00033-00048461`).
+- `invoice_date`: Fecha de emisión (`YYYY-MM-DD`).
+- `due_date`: Fecha de vencimiento comercial de PAGO (`YYYY-MM-DD`). Vacío si no figura ni puede calcularse por plazo único en días. ¡Nunca poner el Vto. de CAE!
+- `payment_terms`: Texto de condición de pago impreso (ej: `"30 días fecha factura"`, `"Cuenta Corriente"`). Entre comillas dobles; `""` si no figura.
+- `cae_number`: CAE / CAEA de 14 dígitos numéricos.
+- `currency`: `ARS`, `USD` o `EUR`.
+- `exchange_rate`: Tipo de cambio impreso (Float, `1.0` si es `ARS`).
+- `purchase_order_number`: Número(s) de OC limpios separados por ` / `. Vacío si no figura.
+- `product_code`: Código(s) del artículo según proveedor (si hay más de uno en la línea, unirlos con ` / `, entre comillas dobles).
+- `description`: Descripción exacta del ítem en una línea (entre comillas dobles).
+- `quantity`: Cantidad facturada (Float).
+- `unit_price`: Precio unitario neto sin IVA antes de descuento (Float).
+- `discount_percentage`: % descuento de línea de 0 a 100 (Float, `0.0` si no hay).
+- `line_net_total`: Subtotal neto de línea (Float).
+- `gross_subtotal`: Suma bruta de líneas antes de descuentos globales (Float).
+- `global_discount_amount`: Descuento general en pie antes de impuestos (Float, `0.0` si no aplica).
+- `net_taxable_base`: Neto Gravado total del comprobante (Float).
+- `exempt_amount`: No Gravado / Exento total (Float, `0.0` si no aplica).
+- `total_vat`: Suma exclusiva de IVA del pie (Float).
+- `other_taxes_perceptions`: Suma total de Percepciones e Impuestos Internos, sin IVA (Float).
+- `perceptions_detail`: Desglose SOLO de percepciones separado por ` | ` (ej: `"Percep. RG 2408/08: 201.03 | Percep. IIBB Entre Rios: 6.70"`).
+- `total_amount`: Total final a pagar de la factura (Float).
+"""
+
+def _compute_due_date_from_terms(invoice_date_str: str, due_date_str: str, payment_terms: str) -> str:
+    """Si no vino due_date explícito pero payment_terms tiene un plazo único en días (ej. '30 dias fecha factura'), lo calcula."""
+    if due_date_str:
+        return due_date_str
+    if not invoice_date_str or not payment_terms:
+        return ""
+    # Evitar plazos múltiples tipo '30/60/90'
+    if re.search(r"\d+\s*[/,-]\s*\d+", payment_terms):
+        return ""
+    m = re.search(r"\b(\d{1,3})\s*d[ií]as?\b", payment_terms.lower())
+    if m:
+        days = int(m.group(1))
+        try:
+            dt = datetime.strptime(invoice_date_str, "%Y-%m-%d") + timedelta(days=days)
+            return dt.strftime("%Y-%m-%d")
+        except ValueError:
+            pass
+    return ""
 
 def _safe_float(val, default=0.0) -> float:
     if val is None:
@@ -221,6 +287,12 @@ def extract_invoice_with_gemini(file_bytes: bytes, mime_type: str) -> dict:
         "perceptions_detail": (first.get("perceptions_detail") or "").strip(),
         "parsed_perceptions": _parse_perceptions_detail(first.get("perceptions_detail") or ""),
         "total_amount": _safe_float(first.get("total_amount"), 0.0),
+        "payment_terms": (first.get("payment_terms") or "").strip(),
+        "due_date": _compute_due_date_from_terms(
+          (first.get("invoice_date") or "").strip(),    
+          (first.get("due_date") or "").strip(),
+          (first.get("payment_terms") or "").strip(),
+        ),
     }
 
     lines = []
@@ -229,9 +301,12 @@ def extract_invoice_with_gemini(file_bytes: bytes, mime_type: str) -> dict:
         price = _safe_float(r.get("unit_price"), 0.0)
         disc = _safe_float(r.get("discount_percentage"), 0.0)
         net = _safe_float(r.get("line_net_total"), round(qty * price * (1.0 - disc / 100.0), 2))
+        raw_pcode = (r.get("product_code") or "").strip()
+        code_list = [c.strip() for c in re.split(r"[/|;]+", raw_pcode) if c.strip()]
         lines.append({
             "index": idx,
-            "product_code": (r.get("product_code") or "").strip(),
+            "product_code": raw_pcode,
+            "product_codes": code_list,
             "description": (r.get("description") or "").strip(),
             "quantity": qty,
             "unit_price": price,

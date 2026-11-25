@@ -1065,12 +1065,49 @@ def _read_purchase_orders_with_lines(models, db, uid, password, po_records: list
                 tax_ids.add(int(tid))
 
     prod_map = {}
+    tmpl_to_prod_ids = {}
     if prod_ids:
         prods = models.execute_kw(
             db, uid, password, "product.product", "read", [list(prod_ids)],
-            {"fields": ["id", "default_code", "name", "barcode"], "context": ctx}
+            {"fields": ["id", "default_code", "name", "barcode", "product_tmpl_id"], "context": ctx}
         )
-        prod_map = {int(p["id"]): p for p in prods}
+        for p in prods:
+            pid = int(p["id"])
+            prod_map[pid] = p
+            if isinstance(p.get("product_tmpl_id"), list):
+                tid = int(p["product_tmpl_id"][0])
+                tmpl_to_prod_ids.setdefault(tid, []).append(pid)
+
+    # Leer códigos de proveedor (product.supplierinfo.product_code) asociados a estos artículos
+    supplier_codes_by_prod = {}  # { (product_id, partner_id_or_0): set_of_codes }
+    if tmpl_to_prod_ids:
+        po_partner_ids = list({int(po["partner_id"][0]) for po in po_records if isinstance(po.get("partner_id"), list)})
+        si_domain = [
+            "|",
+            ("product_id", "in", list(prod_ids)),
+            ("product_tmpl_id", "in", list(tmpl_to_prod_ids.keys())),
+        ]
+        s_infos = models.execute_kw(
+            db, uid, password, "product.supplierinfo", "search_read",
+            [si_domain],
+            {"fields": ["partner_id", "product_id", "product_tmpl_id", "product_code", "product_name"], "context": ctx}
+        )
+        for si in s_infos:
+            scode = (si.get("product_code") or "").strip()
+            if not scode:
+                continue
+            sup_pid = int(si["partner_id"][0]) if isinstance(si.get("partner_id"), list) else 0
+            target_pids = []
+            if isinstance(si.get("product_id"), list):
+                target_pids = [int(si["product_id"][0])]
+            elif isinstance(si.get("product_tmpl_id"), list):
+                target_pids = tmpl_to_prod_ids.get(int(si["product_tmpl_id"][0]), [])
+
+            for t_pid in target_pids:
+                # Si pertenece al proveedor de la OC lo guardamos con prioridad y también en bolsa general (0)
+                if sup_pid in po_partner_ids:
+                    supplier_codes_by_prod.setdefault((t_pid, sup_pid), []).append(scode)
+                supplier_codes_by_prod.setdefault((t_pid, 0), []).append(scode)
 
     tax_map = {}
     if tax_ids:
@@ -1083,7 +1120,12 @@ def _read_purchase_orders_with_lines(models, db, uid, password, po_records: list
     out = []
     for po in po_records:
         po_lines = []
+        po_partner_id = int(po["partner_id"][0]) if isinstance(po.get("partner_id"), list) else 0
         for lid in (po.get("order_line") or []):
+            v_codes = list(dict.fromkeys(
+                supplier_codes_by_prod.get((pid, po_partner_id), []) +
+                supplier_codes_by_prod.get((pid, 0), [])
+            ))
             rl = lines_by_id.get(int(lid))
             if not rl or rl.get("display_type"):
                 continue
@@ -1095,13 +1137,15 @@ def _read_purchase_orders_with_lines(models, db, uid, password, po_records: list
             qty_ordered = float(rl.get("product_qty") or 0.0)
             qty_invoiced = float(rl.get("qty_invoiced") or 0.0)
             qty_pending = round(max(qty_ordered - qty_invoiced, 0.0), 4)
-
+        
             po_lines.append({
+                
                 "po_line_id": int(rl["id"]),
                 "po_id": int(po["id"]),
                 "po_name": po["name"],
                 "product_id": pid,
                 "default_code": p_info.get("default_code") or "",
+                "vendor_codes": v_codes,  # <-- Códigos en product.supplierinfo.product_code
                 "product_name": p_info.get("name") or (rl["product_id"][1] if isinstance(rl.get("product_id"), list) else ""),
                 "description": rl.get("name") or "",
                 "product_qty": qty_ordered,
@@ -1133,6 +1177,7 @@ def _read_purchase_orders_with_lines(models, db, uid, password, po_records: list
             "invoice_status": po.get("invoice_status") or "",
             "state": po.get("state") or "",
             "lines": po_lines,
+            "payment_term_id": int(po["payment_term_id"][0]) if isinstance(po.get("payment_term_id"), list) else None,
         })
     return out
 
@@ -1151,7 +1196,7 @@ def search_purchase_orders_for_bill(
     po_fields = [
         "id", "name", "partner_id", "partner_ref", "date_order",
         "currency_id", "amount_untaxed", "amount_tax", "amount_total",
-        "state", "invoice_status", "order_line",
+        "state", "invoice_status", "order_line","payment_term_id",
     ]
     base_domain = [("company_id", "=", int(company_id)), ("state", "in", ["purchase", "done"])]
 
@@ -1385,6 +1430,49 @@ def _infer_default_vat_tax(header: dict, vat_taxes: list):
             return t
     return vat_taxes[0] if vat_taxes else None
 
+def _score_product_codes(inv_codes: list, vendor_codes: list, internal_code: str, pl_desc: str) -> float:
+    """
+    Compara todos los códigos extraídos del PDF contra:
+    1. product.supplierinfo.product_code (match exacto = 0.85, parcial = 0.70)
+    2. product.product.default_code contemplando prefijos/sufijos de letras propios de Argelec (0.65)
+    """
+    if not inv_codes:
+        return 0.0
+
+    def norm(c: str) -> str:
+        return re.sub(r"[^a-z0-9]", "", (c or "").lower())
+
+    norm_inv = [norm(c) for c in inv_codes if len(norm(c)) >= 3]
+    norm_sup = [norm(c) for c in (vendor_codes or []) if len(norm(c)) >= 3]
+    norm_int = norm(internal_code)
+
+    best = 0.0
+    for ic in norm_inv:
+        # 1. Cruce prioritario contra product.supplierinfo.product_code
+        for sc in norm_sup:
+            if ic == sc:
+                return 0.85
+            if len(ic) >= 4 and len(sc) >= 4 and (ic in sc or sc in ic):
+                best = max(best, 0.72)
+
+        # 2. Cruce contra default_code interno de Argelec (que suele tener letras agregadas al inicio/fin)
+        if norm_int:
+            if ic == norm_int:
+                best = max(best, 0.78)
+            elif len(ic) >= 4 and (ic in norm_int or norm_int in ic):
+                best = max(best, 0.65)
+            else:
+                # Comparar núcleo numérico si tiene al menos 5 dígitos (ej. prov '100025' vs interno 'IM100025AR')
+                ic_digits = re.sub(r"\D", "", ic)
+                int_digits = re.sub(r"\D", "", norm_int)
+                if len(ic_digits) >= 5 and ic_digits == int_digits:
+                    best = max(best, 0.58)
+
+        # 3. Código mencionado dentro de la descripción de la línea de OC
+        if len(ic) >= 4 and ic in norm(pl_desc):
+            best = max(best, 0.50)
+
+    return best
 
 def auto_match_invoice_lines_to_pos(
     invoice_lines: list,
@@ -1406,11 +1494,20 @@ def auto_match_invoice_lines_to_pos(
         inv_desc = (inv_ln.get("description") or "").strip().lower()
         inv_qty = float(inv_ln.get("quantity") or 0.0)
         inv_price = float(inv_ln.get("unit_price") or 0.0)
-
+        inv_codes = inv_ln.get("product_codes") or (
+            [c.strip() for c in re.split(r"[/|;]+", inv_ln.get("product_code") or "") if c.strip()]
+        )
         best_pl = None
         best_score = 0.0
 
         for pl in pool:
+            pl_desc = f"{pl.get('product_name', '')} {pl.get('description', '')}".strip().lower()
+            score = _score_product_codes(
+                inv_codes=inv_codes,
+                vendor_codes=pl.get("vendor_codes", []),
+                internal_code=pl.get("default_code", ""),
+                pl_desc=pl_desc,
+            )
             pl_id = pl["po_line_id"]
             pl_code = (pl.get("default_code") or "").strip().lower()
             pl_desc = f"{pl.get('product_name', '')} {pl.get('description', '')}".strip().lower()
@@ -1764,8 +1861,35 @@ def create_draft_vendor_bill(
         move_vals["invoice_date"] = header["invoice_date"]
         move_vals["date"] = header["invoice_date"]
     if header.get("due_date"):
+        # Caso 1: La factura tiene fecha de vencimiento explícita (o calculada por días)
         move_vals["invoice_date_due"] = header["due_date"]
+    else:
+        # Caso 2: El PDF no tiene fecha de vencimiento -> heredar Plazo de Pago de la OC o del Proveedor
+        payment_term_id = None
 
+        # A) Intentar tomar el plazo de pago de la Orden de Compra vinculada
+        if linked_po_names and "invoice_payment_term_id" in am_meta:
+            po_recs = models.execute_kw(
+                db, uid, password, "purchase.order", "search_read",
+                [[("company_id", "=", int(company_id)), ("name", "in", list(linked_po_names))]],
+                {"fields": ["payment_term_id"], "limit": 1, "context": ctx},
+            )
+            if po_recs and isinstance(po_recs[0].get("payment_term_id"), list):
+                payment_term_id = int(po_recs[0]["payment_term_id"][0])
+
+        # B) Si no había OC o la OC no tenía plazo, tomar el plazo por defecto de la ficha del Proveedor
+        if not payment_term_id and "invoice_payment_term_id" in am_meta:
+            vend_recs = models.execute_kw(
+                db, uid, password, "res.partner", "read",
+                [[int(partner_id)]],
+                {"fields": ["property_supplier_payment_term_id"], "context": ctx},
+            )
+            if vend_recs and isinstance(vend_recs[0].get("property_supplier_payment_term_id"), list):
+                payment_term_id = int(vend_recs[0]["property_supplier_payment_term_id"][0])
+
+        if payment_term_id:
+            move_vals["invoice_payment_term_id"] = payment_term_id
+  
     if latam_doc_type_id and "l10n_latam_document_type_id" in am_meta:
         move_vals["l10n_latam_document_type_id"] = latam_doc_type_id
     if inv_num:
