@@ -303,7 +303,7 @@ def extract_invoice_with_gemini(file_bytes: bytes, mime_type: str) -> dict:
         "parsed_perceptions": _parse_perceptions_detail(first.get("perceptions_detail") or ""),
         "total_amount": _safe_float(first.get("total_amount"), 0.0),
         "payment_terms": (first.get("payment_terms") or "").strip(),
-        "due_date": _compute_due_date_from_terms(
+        "due_date": _sanitize_and_compute_due_date(
           (first.get("invoice_date") or "").strip(),    
           (first.get("due_date") or "").strip(),
           (first.get("payment_terms") or "").strip(),
