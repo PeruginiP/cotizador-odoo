@@ -1,9 +1,8 @@
 import os
 import time
-import threading
 import base64
+import threading
 from fastapi import FastAPI, Request, Form, HTTPException, Depends, UploadFile, File
-from app.invoice_extractor import extract_invoice_with_gemini
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -23,6 +22,7 @@ from app.database import (
     log_quotation,
 )
 from app.odoo_sync import run_full_sync
+from app.invoice_extractor import extract_invoice_with_gemini
 from app.odoo_client import (
     authenticate_odoo_user,
     get_all_companies,
@@ -34,16 +34,18 @@ from app.odoo_client import (
     save_quotation,
     get_quotation_options,
     compute_pricelist_prices_odoo_fallback,
+    # --- Nuevas funciones para Facturas de Proveedor ---
     find_vendor_by_cuit_or_name,
     search_purchase_orders_for_bill,
     get_purchase_tax_options,
     auto_match_invoice_lines_to_pos,
+    match_extracted_perceptions_to_odoo,
     create_draft_vendor_bill,
 )
 
 load_dotenv()
 
-app = FastAPI(title="Cotizador Argelec - Odoo")
+app = FastAPI(title="Portal Argelec - Odoo")
 SECRET_KEY = os.getenv("SECRET_KEY", "cambia-esta-clave-secreta-en-coolify")
 app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY, max_age=28800, https_only=False)
 
@@ -54,11 +56,13 @@ templates = Jinja2Templates(directory="app/templates")
 
 login_attempts = {}
 
+
 @app.on_event("startup")
 def startup_event():
     init_db()
     if get_sync_status().get("status") == "running":
         update_sync_status("idle", "Listo (contenedor reiniciado)")
+
 
 def get_current_user(request: Request):
     user = request.session.get("user")
@@ -66,11 +70,13 @@ def get_current_user(request: Request):
         raise HTTPException(status_code=401, detail="No autenticado")
     return user
 
+
 def validate_user_company(user: dict, company_id: int) -> list:
     allowed = [int(c["id"]) for c in user.get("allowed_companies", [])]
     if company_id not in allowed:
         raise HTTPException(status_code=403, detail="No tenés permisos sobre la compañía seleccionada.")
     return allowed
+
 
 # --- RUTAS DE AUTENTICACIÓN ---
 @app.get("/login", response_class=HTMLResponse)
@@ -78,6 +84,7 @@ def login_page(request: Request):
     if request.session.get("user"):
         return RedirectResponse(url="/menu", status_code=302)
     return templates.TemplateResponse("login.html", {"request": request, "error": None})
+
 
 @app.post("/login", response_class=HTMLResponse)
 def login_submit(request: Request, username: str = Form(...), password: str = Form(...)):
@@ -112,7 +119,7 @@ def login_submit(request: Request, username: str = Form(...), password: str = Fo
             "allowed_companies": all_comps,
             "default_company_id": all_comps[0]["id"] if all_comps else 1,
         }
-        return RedirectResponse(url="/", status_code=302)
+        return RedirectResponse(url="/menu", status_code=302)
 
     attempts.append(now)
     login_attempts[client_ip] = attempts
@@ -122,16 +129,20 @@ def login_submit(request: Request, username: str = Form(...), password: str = Fo
         status_code=401,
     )
 
+
 @app.get("/logout")
 def logout(request: Request):
     request.session.clear()
     return RedirectResponse(url="/login", status_code=302)
 
+
+# --- VISTAS PRINCIPALES (MENÚ, COTIZADOR Y FACTURAS PROVEEDOR) ---
 @app.get("/", response_class=HTMLResponse)
 def root_redirect(request: Request):
     if not request.session.get("user"):
         return RedirectResponse(url="/login", status_code=302)
     return RedirectResponse(url="/menu", status_code=302)
+
 
 @app.get("/menu", response_class=HTMLResponse)
 def hub_menu(request: Request):
@@ -139,6 +150,7 @@ def hub_menu(request: Request):
     if not user:
         return RedirectResponse(url="/login", status_code=302)
     return templates.TemplateResponse("menu.html", {"request": request, "user": user})
+
 
 @app.get("/cotizador", response_class=HTMLResponse)
 def cotizador_view(request: Request):
@@ -157,6 +169,7 @@ def cotizador_view(request: Request):
     response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
     return response
 
+
 @app.get("/facturas-proveedor", response_class=HTMLResponse)
 def vendor_bills_view(request: Request):
     user = request.session.get("user")
@@ -173,27 +186,11 @@ def vendor_bills_view(request: Request):
     response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
     return response
 
-# --- VISTA PRINCIPAL ---
-@app.get("/", response_class=HTMLResponse)
-def index(request: Request):
-    user = request.session.get("user")
-    if not user:
-        return RedirectResponse(url="/login", status_code=302)
-    response = templates.TemplateResponse(
-        "index.html",
-        {
-            "request": request,
-            "user": user,
-            "warehouses": get_all_warehouses(),
-            "odoo_url": os.getenv("ODOO_URL", "").rstrip("/"),
-        },
-    )
-    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
-    return response
 
 @app.get("/api/warehouses")
 def api_warehouses(user: dict = Depends(get_current_user)):
     return JSONResponse(get_all_warehouses())
+
 
 # --- API DE PRODUCTOS (DATATABLES SERVER-SIDE) ---
 @app.get("/api/products")
@@ -226,10 +223,12 @@ def api_products(request: Request, user: dict = Depends(get_current_user)):
         "data": result["data"],
     })
 
+
 # --- API DE SINCRONIZACIÓN ---
 @app.get("/api/sync/status")
 def api_sync_status(user: dict = Depends(get_current_user)):
     return JSONResponse(get_sync_status())
+
 
 @app.post("/api/sync")
 def api_trigger_sync(user: dict = Depends(get_current_user)):
@@ -242,6 +241,7 @@ def api_trigger_sync(user: dict = Depends(get_current_user)):
     thread.start()
     return JSONResponse({"ok": True, "message": "Sincronización iniciada en segundo plano."})
 
+
 # --- API DE OPCIONES, PRECIOS DE LISTA, CLIENTES Y COTIZACIONES ---
 @app.get("/api/quotation-options")
 def api_quotation_options(company_id: int, user: dict = Depends(get_current_user)):
@@ -251,15 +251,18 @@ def api_quotation_options(company_id: int, user: dict = Depends(get_current_user
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
 class PricelistItemIn(BaseModel):
     product_id: int
     qty: float = 1.0
+
 
 class PricelistComputeIn(BaseModel):
     company_id: int
     pricelist_id: int
     partner_id: Optional[int] = None
     items: List[PricelistItemIn]
+
 
 @app.post("/api/pricelist-prices")
 def api_pricelist_prices(payload: PricelistComputeIn, user: dict = Depends(get_current_user)):
@@ -285,6 +288,7 @@ def api_pricelist_prices(payload: PricelistComputeIn, user: dict = Depends(get_c
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
 @app.get("/api/customers")
 def api_customers(company_id: int, q: str = "", include_children: bool = False, user: dict = Depends(get_current_user)):
     allowed = validate_user_company(user, company_id)
@@ -296,6 +300,7 @@ def api_customers(company_id: int, q: str = "", include_children: bool = False, 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
 @app.get("/api/customers/{partner_id}")
 def api_customer_details(partner_id: int, company_id: int, user: dict = Depends(get_current_user)):
     allowed = validate_user_company(user, company_id)
@@ -304,6 +309,7 @@ def api_customer_details(partner_id: int, company_id: int, user: dict = Depends(
         return JSONResponse(details)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.get("/api/partners/{partner_id}/card")
 def api_single_partner_card(partner_id: int, company_id: int, user: dict = Depends(get_current_user)):
@@ -314,6 +320,7 @@ def api_single_partner_card(partner_id: int, company_id: int, user: dict = Depen
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
 @app.get("/api/quotations/search")
 def api_search_quotations(company_id: int, q: str = "", user: dict = Depends(get_current_user)):
     allowed = validate_user_company(user, company_id)
@@ -322,6 +329,7 @@ def api_search_quotations(company_id: int, q: str = "", user: dict = Depends(get
         return JSONResponse(orders)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.get("/api/quotations/{order_id}")
 def api_get_quotation(order_id: int, company_id: int, user: dict = Depends(get_current_user)):
@@ -346,6 +354,7 @@ def api_get_quotation(order_id: int, company_id: int, user: dict = Depends(get_c
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
 class QuotationLineIn(BaseModel):
     line_id: Optional[int] = None
     row_type: str = "product"
@@ -355,6 +364,7 @@ class QuotationLineIn(BaseModel):
     price_unit: float = 0.0
     discount: float = 0.0
     tax_ids: List[int] = []
+
 
 class QuotationSaveIn(BaseModel):
     order_id: Optional[int] = None
@@ -370,6 +380,7 @@ class QuotationSaveIn(BaseModel):
     purchase_order_number: str = ""
     client_order_ref: str = ""
     lines: List[QuotationLineIn]
+
 
 @app.post("/api/quotations")
 def api_save_quotation(payload: QuotationSaveIn, user: dict = Depends(get_current_user)):
@@ -414,7 +425,8 @@ def api_save_quotation(payload: QuotationSaveIn, user: dict = Depends(get_curren
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error al guardar cotización en Odoo: {str(e)}")
 
-    # --- API DE FACTURAS DE PROVEEDOR + CONCILIACIÓN OC ---
+
+# --- API DE FACTURAS DE PROVEEDOR + CONCILIACIÓN OC ---
 
 @app.get("/api/vendor-bills/options")
 def api_vendor_bill_options(company_id: int, user: dict = Depends(get_current_user)):
@@ -470,8 +482,23 @@ async def api_extract_vendor_bill(
                 "vat": header.get("vendor_cuit", ""),
             }
 
-        # 3. Cruzar líneas de factura vs líneas de las OC encontradas
-        matched_lines = auto_match_invoice_lines_to_pos(extracted["lines"], purchase_orders)
+        # 3. Traer impuestos activos de compra de la empresa en Odoo
+        tax_opts = get_purchase_tax_options(company_id, allowed)
+
+        # 4. Cruzar líneas de factura vs OC (con inferencia automática de ej. 1IVA21C si falta)
+        matched_lines = auto_match_invoice_lines_to_pos(
+            extracted["lines"],
+            purchase_orders,
+            header=header,
+            vat_taxes=tax_opts.get("vat_taxes", []),
+        )
+
+        # 5. Cruzar percepciones leídas (RG 2408 -> Percepcion IVA, Provincias -> Percepcion IIBB ...)
+        matched_perceptions = match_extracted_perceptions_to_odoo(
+            header.get("parsed_perceptions", []),
+            tax_opts.get("perception_taxes", []),
+        )
+        header["parsed_perceptions"] = matched_perceptions
 
         return JSONResponse({
             "ok": True,
@@ -526,6 +553,7 @@ class PerceptionLineIn(BaseModel):
     label: str
     amount: float = 0.0
     tax_id: Optional[int] = None
+    tax_name: Optional[str] = ""
     add_as_line: bool = False
 
 

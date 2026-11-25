@@ -1,5 +1,7 @@
 import xmlrpc.client
 import os
+import unicodedata
+from markupsafe import Markup
 from app.database import get_local_pricelists_for_company
 from datetime import datetime, timezone, timedelta
 
@@ -1221,8 +1223,59 @@ def search_purchase_orders_for_bill(
     return []
 
 
+def _strip_accents(text: str) -> str:
+    return "".join(
+        c for c in unicodedata.normalize("NFD", text or "")
+        if unicodedata.category(c) != "Mn"
+    )
+
+
+def _normalize_ar_invoice_number(raw_num: str) -> str:
+    s = (raw_num or "").strip()
+    if not s:
+        return ""
+    if "-" in s:
+        pos, num = s.split("-", 1)
+        pos_d = re.sub(r"\D", "", pos)
+        num_d = re.sub(r"\D", "", num)
+        if pos_d and num_d:
+            return f"{pos_d.zfill(5)[-5:]}-{num_d.zfill(8)[-8:]}"
+    digits = re.sub(r"\D", "", s)
+    if len(digits) > 8:
+        return f"{digits[:-8].zfill(5)[-5:]}-{digits[-8:]}"
+    return s
+
+
+PROVINCE_ALIASES = {
+    "caba": ["caba", "capital federal", "ciudad autonoma", "c.a.b.a", "cf", "901"],
+    "buenos aires": ["buenos aires", "bs as", "bs.as", "bs. as", "pba", "arba", "902"],
+    "catamarca": ["catamarca", "903"],
+    "cordoba": ["cordoba", "cba", "904"],
+    "corrientes": ["corrientes", "905"],
+    "chaco": ["chaco", "906"],
+    "chubut": ["chubut", "907"],
+    "entre rios": ["entre rios", "e. rios", "e.rios", "erios", "908"],
+    "formosa": ["formosa", "909"],
+    "jujuy": ["jujuy", "910"],
+    "la pampa": ["la pampa", "pampa", "911"],
+    "la rioja": ["la rioja", "rioja", "912"],
+    "mendoza": ["mendoza", "mza", "913"],
+    "misiones": ["misiones", "914"],
+    "neuquen": ["neuquen", "nqn", "915"],
+    "rio negro": ["rio negro", "r. negro", "r.negro", "916"],
+    "salta": ["salta", "917"],
+    "san juan": ["san juan", "918"],
+    "san luis": ["san luis", "919"],
+    "santa cruz": ["santa cruz", "920"],
+    "santa fe": ["santa fe", "sta fe", "sta. fe", "api", "921"],
+    "santiago del estero": ["santiago del estero", "sgo del estero", "sgo. del estero", "922"],
+    "tierra del fuego": ["tierra del fuego", "tdf", "923"],
+    "tucuman": ["tucuman", "tuc", "924"],
+}
+
+
 def get_purchase_tax_options(company_id: int, allowed_company_ids: list) -> dict:
-    """Devuelve impuestos de compra y percepciones disponibles en Odoo para esa empresa."""
+    """Devuelve impuestos de Compras activos en Odoo separados en IVA y Percepciones."""
     _, db, uid, password, models = _get_odoo_service_connection()
     hierarchy_ids = _get_company_hierarchy(models, db, uid, password, int(company_id), allowed_company_ids)
     ctx = _make_company_context(int(company_id), allowed_company_ids)
@@ -1232,18 +1285,27 @@ def get_purchase_tax_options(company_id: int, allowed_company_ids: list) -> dict
         [[
             ("type_tax_use", "=", "purchase"),
             ("active", "=", True),
-            ("company_id", "in", hierarchy_ids),
+            "|", ("company_id", "=", False), ("company_id", "in", hierarchy_ids),
         ]],
-        {"fields": ["id", "name", "amount", "amount_type", "tax_group_id"], "order": "sequence asc, id asc", "context": ctx}
+        {
+            "fields": ["id", "name", "description", "invoice_label", "amount", "amount_type", "tax_group_id"],
+            "order": "sequence asc, id asc",
+            "context": ctx,
+        },
     )
 
     vat_taxes = []
     perception_taxes = []
     for t in taxes:
-        grp_name = (t["tax_group_id"][1] if isinstance(t.get("tax_group_id"), list) else "").lower()
-        t_name = (t.get("name") or "").lower()
-        item = {"id": int(t["id"]), "name": t["name"], "amount": float(t.get("amount") or 0.0)}
-        if "perc" in t_name or "iibb" in t_name or "ingresos brutos" in t_name or "perc" in grp_name or "rg " in t_name:
+        grp_name = _strip_accents(t["tax_group_id"][1] if isinstance(t.get("tax_group_id"), list) else "").lower()
+        t_name_norm = _strip_accents(t.get("name") or "").lower()
+        item = {
+            "id": int(t["id"]),
+            "name": t["name"],
+            "description": t.get("description") or t.get("invoice_label") or t["name"],
+            "amount": float(t.get("amount") or 0.0),
+        }
+        if any(k in t_name_norm or k in grp_name for k in ("perc", "iibb", "ingresos brutos", "ganancia", "adicional")):
             perception_taxes.append(item)
         else:
             vat_taxes.append(item)
@@ -1251,13 +1313,91 @@ def get_purchase_tax_options(company_id: int, allowed_company_ids: list) -> dict
     return {"vat_taxes": vat_taxes, "perception_taxes": perception_taxes}
 
 
-def auto_match_invoice_lines_to_pos(invoice_lines: list, purchase_orders: list) -> list:
-    """Cruza automáticamente cada línea extraída por Gemini con la mejor línea disponible de las OC seleccionadas."""
+def match_extracted_perceptions_to_odoo(parsed_perceptions: list, perception_taxes: list) -> list:
+    """Cruza automáticamente cada percepción leída en el PDF contra el catálogo de impuestos de Argelec."""
+    enriched = []
+    for p in (parsed_perceptions or []):
+        lbl = p.get("label") or ""
+        amt = float(p.get("amount") or 0.0)
+        norm_lbl = _strip_accents(lbl).lower()
+
+        matched_tax = None
+
+        # 1. Percepción de IVA (RG 2408 / RG 3337 / Perc. IVA) -> 'Percepcion IVA'
+        if any(k in norm_lbl for k in ("2408", "3337", "perc. iva", "percep. iva", "percepcion iva", "percepcion de iva", "iva rg")):
+            for t in perception_taxes:
+                tn = _strip_accents(t["name"]).lower()
+                if "percepcion iva" in tn or ("iva" in tn and "perc" in tn):
+                    matched_tax = t
+                    break
+
+        # 2. Percepción de Ganancias -> 'Percepcion Ganancias'
+        if not matched_tax and any(k in norm_lbl for k in ("ganancia", "rg 830", "2281")):
+            for t in perception_taxes:
+                if "ganancia" in _strip_accents(t["name"]).lower():
+                    matched_tax = t
+                    break
+
+        # 3. Percepción IIBB por Provincia -> 'Percepcion IIBB Entre Rios', 'Percepcion IIBB Cordoba', etc.
+        if not matched_tax:
+            for prov_canonical, aliases in PROVINCE_ALIASES.items():
+                if any(re.search(rf"(?<!\w){re.escape(a)}(?!\w)", norm_lbl) for a in aliases):
+                    for t in perception_taxes:
+                        tn = _strip_accents(f"{t['name']} {t.get('description', '')}").lower()
+                        if "iibb" in tn and prov_canonical in tn:
+                            matched_tax = t
+                            break
+                    if matched_tax:
+                        break
+
+        enriched.append({
+            "label": lbl,
+            "amount": amt,
+            "tax_id": matched_tax["id"] if matched_tax else None,
+            "tax_name": matched_tax["name"] if matched_tax else "",
+        })
+    return enriched
+
+
+def _infer_default_vat_tax(header: dict, vat_taxes: list):
+    """Si una línea no tiene OC asociada o la OC no tenía IVA, infiere el IVA de compra (ej. 1IVA21C) desde el pie del PDF."""
+    letter = (header.get("invoice_letter") or "A").upper()
+    if letter in ("C", "E"):
+        for t in vat_taxes:
+            if "no corresp" in t["name"].lower() or "exen" in t["name"].lower() or t["amount"] == 0.0:
+                return t
+        return None
+
+    net = float(header.get("net_taxable_base") or 0.0)
+    vat = float(header.get("total_vat") or 0.0)
+    target_rate = 21.0
+    if net > 0 and vat > 0:
+        ratio = (vat / net) * 100.0
+        for candidate in (21.0, 10.5, 27.0, 5.0, 2.5, 0.0):
+            if abs(ratio - candidate) <= 1.2:
+                target_rate = candidate
+                break
+    elif net > 0 and vat == 0:
+        target_rate = 0.0
+
+    for t in vat_taxes:
+        if abs(float(t["amount"]) - target_rate) < 0.1 and "iva" in t["name"].lower():
+            return t
+    return vat_taxes[0] if vat_taxes else None
+
+
+def auto_match_invoice_lines_to_pos(
+    invoice_lines: list,
+    purchase_orders: list,
+    header: dict = None,
+    vat_taxes: list = None,
+) -> list:
     pool = []
     for po in purchase_orders:
         for pl in po.get("lines", []):
             pool.append(pl)
 
+    fallback_vat = _infer_default_vat_tax(header or {}, vat_taxes or [])
     used_po_lines = set()
     matched_out = []
 
@@ -1284,7 +1424,6 @@ def auto_match_invoice_lines_to_pos(invoice_lines: list, purchase_orders: list) 
             if inv_desc and pl_desc:
                 score += SequenceMatcher(None, inv_desc, pl_desc).ratio() * 0.45
 
-            # Bonus por coincidencia de cantidad pendiente o precio cercano
             ref_qty = pl["qty_pending"] if pl["qty_pending"] > 0 else pl["product_qty"]
             if ref_qty > 0 and abs(inv_qty - ref_qty) / max(ref_qty, 1.0) <= 0.05:
                 score += 0.15
@@ -1300,6 +1439,8 @@ def auto_match_invoice_lines_to_pos(invoice_lines: list, purchase_orders: list) 
 
         if best_pl and best_score >= 0.28:
             used_po_lines.add(best_pl["po_line_id"])
+            line_tax_ids = best_pl["tax_ids"] if best_pl["tax_ids"] else ([fallback_vat["id"]] if fallback_vat else [])
+            line_tax_names = best_pl["tax_names"] if best_pl["tax_ids"] else (fallback_vat["name"] if fallback_vat else "Sin IVA")
             matched_out.append({
                 **inv_ln,
                 "matched_po_line_id": best_pl["po_line_id"],
@@ -1309,8 +1450,8 @@ def auto_match_invoice_lines_to_pos(invoice_lines: list, purchase_orders: list) 
                 "po_qty_pending": best_pl["qty_pending"],
                 "po_price_unit": best_pl["price_unit"],
                 "po_discount": best_pl["discount"],
-                "tax_ids": best_pl["tax_ids"],
-                "tax_names": best_pl["tax_names"],
+                "tax_ids": line_tax_ids,
+                "tax_names": line_tax_names,
                 "match_confidence": round(min(best_score, 1.0) * 100),
             })
         else:
@@ -1323,12 +1464,205 @@ def auto_match_invoice_lines_to_pos(invoice_lines: list, purchase_orders: list) 
                 "po_qty_pending": None,
                 "po_price_unit": None,
                 "po_discount": None,
-                "tax_ids": [],
-                "tax_names": "Seleccionar IVA",
+                "tax_ids": [fallback_vat["id"]] if fallback_vat else [],
+                "tax_names": fallback_vat["name"] if fallback_vat else "Seleccionar IVA",
                 "match_confidence": 0,
             })
 
     return matched_out
+
+
+def _resolve_ar_latam_document_type(models, db, uid, password, doc_type_str: str, letter: str, ctx: dict):
+    """Resuelve con exactitud el código AFIP/ARCA en l10n_latam.document.type (ej. código '1' = Factura A)."""
+    afip_code_map = {
+        ("FACTURA", "A"): "1",
+        ("NOTA_DEBITO", "A"): "2",
+        ("NOTA_CREDITO", "A"): "3",
+        ("FACTURA", "B"): "6",
+        ("NOTA_DEBITO", "B"): "7",
+        ("NOTA_CREDITO", "B"): "8",
+        ("FACTURA", "C"): "11",
+        ("NOTA_DEBITO", "C"): "12",
+        ("NOTA_CREDITO", "C"): "13",
+        ("FACTURA", "M"): "51",
+        ("NOTA_DEBITO", "M"): "52",
+        ("NOTA_CREDITO", "M"): "53",
+    }
+    norm_doc = "NOTA_CREDITO" if "CRED" in doc_type_str else ("NOTA_DEBITO" if "DEB" in doc_type_str else "FACTURA")
+    afip_code = afip_code_map.get((norm_doc, letter))
+
+    try:
+        if afip_code:
+            # Buscar por código AFIP exacto ('1' o '001') de Argentina
+            recs = models.execute_kw(
+                db, uid, password, "l10n_latam.document.type", "search_read",
+                [[
+                    ("active", "=", True),
+                    ("code", "in", [afip_code, afip_code.zfill(2), afip_code.zfill(3)]),
+                ]],
+                {"fields": ["id", "name", "code", "doc_code_prefix"], "order": "id asc", "limit": 5, "context": ctx},
+            )
+            if recs:
+                return int(recs[0]["id"])
+
+        # Fallback por prefijo (FA-A, Facturas A)
+        internal_t = "credit_note" if norm_doc == "NOTA_CREDITO" else ("debit_note" if norm_doc == "NOTA_DEBITO" else "invoice")
+        recs = models.execute_kw(
+            db, uid, password, "l10n_latam.document.type", "search_read",
+            [[
+                ("active", "=", True),
+                ("internal_type", "=", internal_t),
+                ("name", "ilike", f" {letter}"),
+            ]],
+            {"fields": ["id", "name"], "limit": 3, "context": ctx},
+        )
+        if recs:
+            return int(recs[0]["id"])
+    except Exception:
+        pass
+    return None
+
+
+def _apply_perception_amounts_in_odoo(
+    models, db, uid, password, move_id: int, valid_perceptions: list, is_refund: bool, curr_code: str, ex_rate: float, ctx: dict
+):
+    """
+    Ajusta el importe exacto de cada percepción en Odoo una vez creado el borrador:
+    1) Soporta l10n_ar_ux (account.move.tax / move_tax_ids) si está instalado.
+    2) Soporta Odoo 17/18 estándar / Enterprise editando el apunte de impuesto (tax_line_id) en moneda extranjera o ARS
+       y recalibrando la línea por pagar (liability_payable) para que el asiento cuadre al centavo.
+    """
+    if not valid_perceptions:
+        return
+
+    am_meta = models.execute_kw(db, uid, password, "account.move", "fields_get", [[]], {"attributes": ["type", "relation"]})
+
+    # Variante A: si tienen instalado ADHOC l10n_ar_ux con tabla move_tax_ids
+    if "move_tax_ids" in am_meta:
+        try:
+            rel_model = am_meta["move_tax_ids"].get("relation") or "account.move.tax"
+            existing_mt = models.execute_kw(
+                db, uid, password, rel_model, "search_read",
+                [[("move_id", "=", int(move_id))]],
+                {"fields": ["id", "tax_id", "tax_amount"], "context": ctx},
+            )
+            mt_by_tax = {int(r["tax_id"][0]): int(r["id"]) for r in existing_mt if isinstance(r.get("tax_id"), list)}
+            for p in valid_perceptions:
+                tid = int(p["tax_id"])
+                amt = float(p["amount"])
+                if tid in mt_by_tax:
+                    models.execute_kw(db, uid, password, rel_model, "write", [[mt_by_tax[tid]], {"tax_amount": amt}], {"context": ctx})
+                else:
+                    models.execute_kw(db, uid, password, rel_model, "create", [{"move_id": int(move_id), "tax_id": tid, "tax_amount": amt}], {"context": ctx})
+            return
+        except Exception:
+            pass
+
+    # Variante B: Odoo 17/18 nativo -> ajustar line_ids donde tax_line_id == tax_id y cuadrar cuenta a pagar
+    try:
+        move_data = models.execute_kw(
+            db, uid, password, "account.move", "read",
+            [[int(move_id)]],
+            {"fields": ["line_ids", "currency_id", "company_currency_id"], "context": ctx},
+        )[0]
+        aml_ids = move_data.get("line_ids") or []
+        if not aml_ids:
+            return
+
+        amls = models.execute_kw(
+            db, uid, password, "account.move.line", "read",
+            [aml_ids],
+            {"fields": ["id", "display_type", "tax_line_id", "account_id", "amount_currency", "debit", "credit", "balance"], "context": ctx},
+        )
+
+        doc_curr_id = move_data["currency_id"][0] if isinstance(move_data.get("currency_id"), list) else None
+        comp_curr_id = move_data["company_currency_id"][0] if isinstance(move_data.get("company_currency_id"), list) else doc_curr_id
+        is_foreign = (doc_curr_id != comp_curr_id)
+
+        # Identificar la línea de cuenta a pagar (liability_payable)
+        acc_ids = list({int(l["account_id"][0]) for l in amls if isinstance(l.get("account_id"), list)})
+        accs = models.execute_kw(db, uid, password, "account.account", "read", [acc_ids], {"fields": ["id", "account_type"], "context": ctx})
+        payable_acc_ids = {int(a["id"]) for a in accs if a.get("account_type") == "liability_payable"}
+
+        payable_line = next(
+            (l for l in amls if l.get("display_type") == "payment_term" or (isinstance(l.get("account_id"), list) and int(l["account_id"][0]) in payable_acc_ids)),
+            None,
+        )
+        tax_lines_by_tid = {
+            int(l["tax_line_id"][0]): l
+            for l in amls
+            if isinstance(l.get("tax_line_id"), list)
+        }
+
+        line_commands = []
+        delta_amt_currency = 0.0
+        delta_balance = 0.0
+
+        # Signo en Odoo: en in_invoice los gastos/impuestos tienen amount_currency > 0 y balance > 0 (debit)
+        sign = -1.0 if is_refund else 1.0
+
+        for p in valid_perceptions:
+            tid = int(p["tax_id"])
+            amt = round(float(p["amount"]), 2)
+            if amt <= 0:
+                continue
+
+            target_amt_curr = round(sign * amt, 2)
+            rate_to_use = ex_rate if (is_foreign and ex_rate > 0) else 1.0
+            target_bal = round(target_amt_curr * rate_to_use, 2)
+
+            if tid in tax_lines_by_tid:
+                tl = tax_lines_by_tid[tid]
+                old_amt_curr = float(tl.get("amount_currency") or 0.0)
+                old_bal = float(tl.get("balance") or 0.0)
+
+                delta_amt_currency += (target_amt_curr - old_amt_curr)
+                delta_balance += (target_bal - old_bal)
+
+                upd_vals = {
+                    "amount_currency": target_amt_curr,
+                    "debit": target_bal if target_bal > 0 else 0.0,
+                    "credit": abs(target_bal) if target_bal < 0 else 0.0,
+                }
+                line_commands.append((1, int(tl["id"]), upd_vals))
+            else:
+                # Si el impuesto era 0% exacto y Odoo no creó tax_line, obtener su cuenta de repartición y crear el apunte
+                reps = models.execute_kw(
+                    db, uid, password, "account.tax.repartition.line", "search_read",
+                    [[("tax_id", "=", tid), ("repartition_type", "=", "tax"), ("document_type", "=", "refund" if is_refund else "invoice")]],
+                    {"fields": ["id", "account_id"], "limit": 1, "context": ctx},
+                )
+                if reps and isinstance(reps[0].get("account_id"), list):
+                    delta_amt_currency += target_amt_curr
+                    delta_balance += target_bal
+                    line_commands.append((0, 0, {
+                        "name": p.get("tax_name") or p.get("label") or "Percepción",
+                        "display_type": "tax",
+                        "tax_line_id": tid,
+                        "tax_repartition_line_id": int(reps[0]["id"]),
+                        "account_id": int(reps[0]["account_id"][0]),
+                        "amount_currency": target_amt_curr,
+                        "debit": target_bal if target_bal > 0 else 0.0,
+                        "credit": abs(target_bal) if target_bal < 0 else 0.0,
+                    }))
+
+        if line_commands and payable_line:
+            new_pay_curr = round(float(payable_line.get("amount_currency") or 0.0) - delta_amt_currency, 2)
+            new_pay_bal = round(float(payable_line.get("balance") or 0.0) - delta_balance, 2)
+            line_commands.append((1, int(payable_line["id"]), {
+                "amount_currency": new_pay_curr,
+                "debit": new_pay_bal if new_pay_bal > 0 else 0.0,
+                "credit": abs(new_pay_bal) if new_pay_bal < 0 else 0.0,
+            }))
+
+            write_ctx = dict(ctx, check_move_validity=False, skip_invoice_sync=True)
+            models.execute_kw(
+                db, uid, password, "account.move", "write",
+                [[int(move_id)], {"line_ids": line_commands}],
+                {"context": write_ctx},
+            )
+    except Exception as exc:
+        print(f"[WARN] No se pudo ajustar monto manual de percepción en line_ids: {exc}", flush=True)
 
 
 def create_draft_vendor_bill(
@@ -1347,59 +1681,62 @@ def create_draft_vendor_bill(
     ctx = _make_company_context(int(company_id), allowed_company_ids)
 
     doc_type_str = (header.get("document_type") or "FACTURA").upper()
-    move_type = "in_refund" if "CREDITO" in doc_type_str or "CRÉDITO" in doc_type_str else "in_invoice"
+    letter = (header.get("invoice_letter") or "A").upper()
+    is_refund = ("CRED" in doc_type_str)
+    move_type = "in_refund" if is_refund else "in_invoice"
 
     am_meta = models.execute_kw(db, uid, password, "account.move", "fields_get", [[]], {"attributes": ["type", "relation"]})
     aml_meta = models.execute_kw(db, uid, password, "account.move.line", "fields_get", [[]], {"attributes": ["type"]})
 
-    # 1. Resolver moneda
+    # 1. Moneda y Diario de Compras (con l10n_latam_use_documents activo si existe)
     curr_code = (header.get("currency") or "ARS").upper()
     currs = models.execute_kw(
         db, uid, password, "res.currency", "search_read",
         [[("name", "=", curr_code), "|", ("active", "=", True), ("active", "=", False)]],
-        {"fields": ["id", "name"], "limit": 1, "context": ctx}
+        {"fields": ["id", "name"], "limit": 1, "context": ctx},
     )
     currency_id = int(currs[0]["id"]) if currs else None
 
-    # 2. Resolver Diario de Compras de la compañía
     journals = models.execute_kw(
         db, uid, password, "account.journal", "search_read",
         [[("company_id", "=", int(company_id)), ("type", "=", "purchase")]],
-        {"fields": ["id", "name"], "order": "sequence asc, id asc", "limit": 1, "context": ctx}
+        {"fields": ["id", "name", "l10n_latam_use_documents"], "order": "sequence asc, id asc", "context": ctx},
     )
-    journal_id = int(journals[0]["id"]) if journals else None
+    # Preferir el diario de compras que usa documentos fiscales ARCA/AFIP
+    latam_journals = [j for j in journals if j.get("l10n_latam_use_documents")]
+    journal_id = int((latam_journals[0] if latam_journals else journals[0])["id"]) if journals else None
 
-    # 3. Resolver Tipo de Comprobante AFIP/ARCA (l10n_latam.document.type)
+    # 2. Tipo de documento AFIP (Factura A = código 1) y Número normalizado 00033-00048461
     latam_doc_type_id = None
-    letter = (header.get("invoice_letter") or "A").upper()
     if "l10n_latam_document_type_id" in am_meta:
-        try:
-            doc_keyword = "Nota de Crédito" if move_type == "in_refund" else ("Nota de Débito" if "DEBITO" in doc_type_str else "Factura")
-            dtypes = models.execute_kw(
-                db, uid, password, "l10n_latam.document.type", "search_read",
-                [[
-                    ("active", "=", True),
-                    ("internal_type", "in", ["invoice", "credit_note", "debit_note"]),
-                    ("doc_code_prefix", "ilike", letter),
-                    ("name", "ilike", doc_keyword),
-                ]],
-                {"fields": ["id", "name", "code"], "limit": 5, "context": ctx}
-            )
-            if dtypes:
-                latam_doc_type_id = int(dtypes[0]["id"])
-        except Exception:
-            pass
+        latam_doc_type_id = _resolve_ar_latam_document_type(models, db, uid, password, doc_type_str, letter, ctx)
 
-    # 4. Construir líneas de factura (heredando purchase_line_id e impuestos)
+    inv_num = _normalize_ar_invoice_number(header.get("invoice_number") or "")
+
+    # 3. Percepciones válidas con tax_id seleccionado
+    valid_perceptions = [
+        p for p in (perceptions or [])
+        if p.get("tax_id") and float(p.get("amount") or 0.0) > 0
+    ]
+    perc_tax_ids = [int(p["tax_id"]) for p in valid_perceptions]
+
+    # 4. Construir líneas de factura: cada línea lleva su IVA (ej. 1IVA21C) + las percepciones en la primera línea gravada
     invoice_line_cmds = []
     linked_po_names = set()
+    tax_field = "tax_ids" if "tax_ids" in aml_meta else "invoice_line_tax_ids"
 
     for idx, ln in enumerate(lines):
+        line_taxes = [int(t) for t in (ln.get("tax_ids") or []) if t]
+        # Agregar los impuestos de percepción a las líneas gravadas para que Odoo vincule la base imponible
+        if perc_tax_ids and idx == 0:
+            line_taxes = list(dict.fromkeys(line_taxes + perc_tax_ids))
+
         vals = {
             "sequence": (idx + 1) * 10,
             "name": str(ln.get("description") or "Ítem facturado"),
             "quantity": float(ln.get("quantity") or 1.0),
             "price_unit": float(ln.get("unit_price") or 0.0),
+            tax_field: [(6, 0, line_taxes)],
         }
         if "discount" in aml_meta:
             vals["discount"] = float(ln.get("discount_percentage") or 0.0)
@@ -1409,33 +1746,10 @@ def create_draft_vendor_bill(
             vals["purchase_line_id"] = int(ln["purchase_line_id"])
         if ln.get("po_name"):
             linked_po_names.add(str(ln["po_name"]))
-        if ln.get("tax_ids") is not None:
-            tax_field = "tax_ids" if "tax_ids" in aml_meta else "invoice_line_tax_ids"
-            vals[tax_field] = [(6, 0, [int(t) for t in ln["tax_ids"] if t])]
 
         invoice_line_cmds.append((0, 0, vals))
 
-    # 5. Si el usuario asignó percepciones con impuesto/importe explícito, sumarlas como apuntes de control o nota
-    perceptions_summary_html = ""
-    if perceptions:
-        li_items = []
-        for p in perceptions:
-            lbl = p.get("label") or "Percepción"
-            amt = float(p.get("amount") or 0.0)
-            tax_id = p.get("tax_id")
-            li_items.append(f"<li>{lbl}: <strong>{curr_code} {amt:,.2f}</strong></li>")
-            # Si seleccionó un impuesto de percepción de compra y monto > 0, podemos cargarlo si es impuesto fijo/base
-            if tax_id and amt > 0 and p.get("add_as_line"):
-                tax_field = "tax_ids" if "tax_ids" in aml_meta else "invoice_line_tax_ids"
-                invoice_line_cmds.append((0, 0, {
-                    "sequence": 900 + idx,
-                    "name": f"Percepción / Tributo: {lbl}",
-                    "quantity": 1.0,
-                    "price_unit": amt,
-                    tax_field: [(6, 0, [int(tax_id)])],
-                }))
-        perceptions_summary_html = "<ul>" + "".join(li_items) + "</ul>"
-
+    # 5. Cabecera de account.move
     move_vals = {
         "move_type": move_type,
         "company_id": int(company_id),
@@ -1452,45 +1766,53 @@ def create_draft_vendor_bill(
     if header.get("due_date"):
         move_vals["invoice_date_due"] = header["due_date"]
 
-    inv_num = (header.get("invoice_number") or "").strip()
+    if latam_doc_type_id and "l10n_latam_document_type_id" in am_meta:
+        move_vals["l10n_latam_document_type_id"] = latam_doc_type_id
     if inv_num:
         if "l10n_latam_document_number" in am_meta:
             move_vals["l10n_latam_document_number"] = inv_num
         move_vals["ref"] = inv_num
-
-    if latam_doc_type_id and "l10n_latam_document_type_id" in am_meta:
-        move_vals["l10n_latam_document_type_id"] = latam_doc_type_id
 
     if linked_po_names:
         move_vals["invoice_origin"] = ", ".join(sorted(linked_po_names))
     elif header.get("purchase_order_number"):
         move_vals["invoice_origin"] = header["purchase_order_number"]
 
-    # Tipo de cambio impreso en comprobante (localización AR)
     ex_rate = float(header.get("exchange_rate") or 1.0)
     if curr_code != "ARS" and ex_rate > 1.0:
-        for rate_field in ["l10n_ar_currency_rate", "manual_currency_rate"]:
-            if rate_field in am_meta:
-                move_vals[rate_field] = ex_rate
+        for rate_f in ("l10n_ar_currency_rate", "manual_currency_rate"):
+            if rate_f in am_meta:
+                move_vals[rate_f] = ex_rate
                 break
 
-    # CAE si el campo existe en account.move
     cae = (header.get("cae_number") or "").strip()
     if cae:
-        for cae_f in ["afip_auth_code", "l10n_ar_afip_auth_code"]:
+        for cae_f in ("l10n_ar_afip_auth_code", "afip_auth_code"):
             if cae_f in am_meta:
                 move_vals[cae_f] = cae
                 break
 
-    # Crear borrador con fallback si algún campo localizado da validación estricta
-    try:
-        move_id = models.execute_kw(db, uid, password, "account.move", "create", [move_vals], {"context": ctx})
-    except Exception:
-        move_vals.pop("l10n_latam_document_number", None)
-        move_vals.pop("l10n_latam_document_type_id", None)
-        move_id = models.execute_kw(db, uid, password, "account.move", "create", [move_vals], {"context": ctx})
+    # Crear factura en borrador
+    move_id = models.execute_kw(db, uid, password, "account.move", "create", [move_vals], {"context": ctx})
 
-    # Adjuntar el PDF/imagen original al comprobante en Odoo
+    # Re-asegurar número y tipo de documento Latam post-create (por si un onchange de partner_id lo pisó)
+    latam_post = {}
+    if latam_doc_type_id and "l10n_latam_document_type_id" in am_meta:
+        latam_post["l10n_latam_document_type_id"] = latam_doc_type_id
+    if inv_num and "l10n_latam_document_number" in am_meta:
+        latam_post["l10n_latam_document_number"] = inv_num
+    if latam_post:
+        try:
+            models.execute_kw(db, uid, password, "account.move", "write", [[int(move_id)], latam_post], {"context": ctx})
+        except Exception as e_lat:
+            print(f"[WARN] l10n_latam post-write: {e_lat}", flush=True)
+
+    # 6. Inyectar los montos exactos de las percepciones leídas en el PDF
+    _apply_perception_amounts_in_odoo(
+        models, db, uid, password, int(move_id), valid_perceptions, is_refund, curr_code, ex_rate, ctx
+    )
+
+    # 7. Adjuntar PDF original como documento principal del visor derecho de Odoo
     if attachment_b64 and attachment_filename:
         try:
             att_id = models.execute_kw(
@@ -1503,51 +1825,72 @@ def create_draft_vendor_bill(
                     "res_id": int(move_id),
                     "mimetype": attachment_mimetype or "application/pdf",
                 }],
-                {"context": ctx}
+                {"context": ctx},
             )
             if "message_main_attachment_id" in am_meta and att_id:
                 models.execute_kw(
                     db, uid, password, "account.move", "write",
                     [[int(move_id)], {"message_main_attachment_id": int(att_id)}],
-                    {"context": ctx}
+                    {"context": ctx},
                 )
         except Exception:
             pass
 
-    # Dejar constancia en el Chatter con totales del PDF y percepciones detectadas
+    # 8. Mensaje limpio en el Chatter (usando body_is_html=True para que Odoo renderice el HTML en vez de escaparlo)
     creator_name = creator_user.get("name", "Usuario Web")
+    perc_lines_html = "".join(
+        f"<li>{p.get('label')} → Impuesto Odoo: <b>{p.get('tax_name') or 'Sin asignar'}</b>: <b>{curr_code} {float(p.get('amount') or 0):,.2f}</b></li>"
+        for p in (perceptions or [])
+    )
     body_html = (
-        f"<p>Factura en borrador generada vía <strong>Portal IA Gemini</strong> por <strong>{creator_name}</strong>.</p>"
+        f"<p>Factura en borrador generada vía <b>Portal IA Gemini</b> por <b>{creator_name}</b>.</p>"
         f"<ul>"
-        f"<li>Comprobante leído: <strong>{doc_type_str} {letter} {inv_num}</strong> (CAE: {cae or 'N/D'})</li>"
-        f"<li>OC vinculadas: <strong>{move_vals.get('invoice_origin') or 'Sin OC'}</strong></li>"
-        f"<li>Neto Gravado PDF: <strong>{curr_code} {float(header.get('net_taxable_base') or 0):,.2f}</strong> | "
-        f"IVA PDF: <strong>{curr_code} {float(header.get('total_vat') or 0):,.2f}</strong> | "
-        f"Percepciones PDF: <strong>{curr_code} {float(header.get('other_taxes_perceptions') or 0):,.2f}</strong> | "
-        f"Total PDF: <strong>{curr_code} {float(header.get('total_amount') or 0):,.2f}</strong></li>"
+        f"<li>Comprobante: <b>{doc_type_str} {letter} {inv_num}</b> (CAE: {cae or 'N/D'})</li>"
+        f"<li>OC vinculadas: <b>{move_vals.get('invoice_origin') or 'Sin OC'}</b></li>"
+        f"<li>Neto PDF: <b>{curr_code} {float(header.get('net_taxable_base') or 0):,.2f}</b> | "
+        f"IVA PDF: <b>{curr_code} {float(header.get('total_vat') or 0):,.2f}</b> | "
+        f"Percepciones PDF: <b>{curr_code} {float(header.get('other_taxes_perceptions') or 0):,.2f}</b> | "
+        f"Total PDF: <b>{curr_code} {float(header.get('total_amount') or 0):,.2f}</b></li>"
         f"</ul>"
     )
-    if perceptions_summary_html:
-        body_html += f"<p><strong>Detalle de Percepciones detectadas en pie de factura (verificar grilla de impuestos):</strong></p>{perceptions_summary_html}"
+    if perc_lines_html:
+        body_html += f"<p><b>Percepciones detectadas y conciliadas:</b></p><ul>{perc_lines_html}</ul>"
 
     try:
-        post_kw = {"body": body_html, "message_type": "comment", "subtype_xmlid": "mail.mt_note", "context": ctx}
+        post_kw = {
+            "body": body_html,
+            "body_is_html": True,
+            "message_type": "comment",
+            "subtype_xmlid": "mail.mt_note",
+            "context": ctx,
+        }
         if creator_user.get("partner_id"):
             post_kw["author_id"] = int(creator_user["partner_id"])
         models.execute_kw(db, uid, password, "account.move", "message_post", [[int(move_id)]], post_kw)
     except Exception:
-        pass
+        # Si la versión de Odoo no acepta body_is_html por XML-RPC, enviar texto plano limpio sin tags HTML
+        plain_text = re.sub(r"<li[^>]*>", "\n• ", body_html)
+        plain_text = re.sub(r"</p>|</ul>", "\n", plain_text)
+        plain_text = re.sub(r"<[^>]+>", "", plain_text).strip()
+        try:
+            models.execute_kw(
+                db, uid, password, "account.move", "message_post",
+                [[int(move_id)]],
+                {"body": plain_text, "message_type": "comment", "subtype_xmlid": "mail.mt_note", "context": ctx},
+            )
+        except Exception:
+            pass
 
     created = models.execute_kw(
         db, uid, password, "account.move", "read",
         [[int(move_id)]],
-        {"fields": ["name", "ref", "amount_untaxed", "amount_tax", "amount_total", "state"], "context": ctx}
+        {"fields": ["name", "ref", "l10n_latam_document_number", "amount_untaxed", "amount_tax", "amount_total", "state"], "context": ctx},
     )[0]
 
     return {
         "move_id": int(move_id),
         "move_name": created.get("name") or f"Borrador #{move_id}",
-        "ref": created.get("ref") or inv_num,
+        "ref": created.get("l10n_latam_document_number") or created.get("ref") or inv_num,
         "amount_untaxed": float(created.get("amount_untaxed") or 0.0),
         "amount_tax": float(created.get("amount_tax") or 0.0),
         "amount_total": float(created.get("amount_total") or 0.0),

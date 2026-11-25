@@ -63,14 +63,37 @@ def _clean_csv_text(raw_text: str) -> str:
     return txt.strip()
 
 
+def _normalize_ar_doc_number(raw_num: str) -> str:
+    """Garantiza formato estricto 5 dígitos PV + guion + 8 dígitos número (ej: 00033-00048461)."""
+    s = (raw_num or "").strip()
+    if not s:
+        return ""
+    if "-" in s:
+        parts = s.split("-", 1)
+        pos = re.sub(r"\D", "", parts[0])
+        num = re.sub(r"\D", "", parts[1])
+        if pos and num:
+            return f"{pos.zfill(5)[-5:]}-{num.zfill(8)[-8:]}"
+    digits = re.sub(r"\D", "", s)
+    if len(digits) > 8:
+        return f"{digits[:-8].zfill(5)[-5:]}-{digits[-8:]}"
+    if digits:
+        return f"00001-{digits.zfill(8)[-8:]}"
+    return s
+
+
 def _parse_perceptions_detail(detail_str: str) -> list:
+    """Soporta tanto '|' como ';' como separador entre múltiples percepciones."""
     if not detail_str or not detail_str.strip():
         return []
     out = []
-    for part in [p.strip() for p in detail_str.split("|") if p.strip()]:
+    # Cortar tanto por '|' como por ';'
+    for part in [p.strip() for p in re.split(r"\s*[|;]\s*", detail_str) if p.strip()]:
         if ":" in part:
             label, amt_str = part.rsplit(":", 1)
-            out.append({"label": label.strip(), "amount": round(_safe_float(amt_str, 0.0), 2)})
+            # Limpiar posible moneda pegada al número (ej: 'USD 67.01')
+            amt_clean = re.sub(r"[^\d.,-]", "", amt_str)
+            out.append({"label": label.strip(), "amount": round(_safe_float(amt_clean, 0.0), 2)})
         else:
             out.append({"label": part, "amount": 0.0})
     return out
@@ -181,7 +204,7 @@ def extract_invoice_with_gemini(file_bytes: bytes, mime_type: str) -> dict:
         "vendor_cuit": (first.get("vendor_cuit") or "").strip(),
         "document_type": (first.get("document_type") or "FACTURA").strip().upper(),
         "invoice_letter": (first.get("invoice_letter") or "A").strip().upper(),
-        "invoice_number": (first.get("invoice_number") or "").strip(),
+        "invoice_number": _normalize_ar_doc_number(first.get("invoice_number") or ""),
         "invoice_date": (first.get("invoice_date") or "").strip(),
         "due_date": (first.get("due_date") or "").strip(),
         "cae_number": re.sub(r"\D", "", first.get("cae_number") or ""),

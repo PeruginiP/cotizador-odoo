@@ -602,16 +602,55 @@
 
         function renderPerceptions() {
             const box = document.getElementById('perceptions-box');
-            if (!state.perceptions.length) {
-                box.innerHTML = `<span class="text-muted">No se detectaron percepciones de IIBB/IVA en este comprobante.</span>`;
-                return;
-            }
-            box.innerHTML = state.perceptions.map((p, i) => `
-                <div class="d-flex align-items-center justify-content-between border-bottom py-1">
-                    <span>${p.label}</span>
-                    <strong>${state.header.currency || 'ARS'} ${p.amount.toLocaleString('es-AR', { minimumFractionDigits: 2 })}</strong>
+            const curr = document.getElementById('hdr-currency').value || 'ARS';
+
+            let rowsHtml = state.perceptions.map((p, i) => {
+                const options = `<option value="">-- Seleccionar impuesto en Odoo --</option>` +
+                    state.perceptionTaxes.map(t =>
+                        `<option value="${t.id}" ${p.tax_id === t.id ? 'selected' : ''}>${t.name}</option>`
+                    ).join('');
+
+                const badgeClass = p.tax_id ? 'border-success bg-success-subtle' : 'border-warning bg-warning-subtle';
+
+                return `
+            <div class="row g-1 align-items-center mb-2 p-1 rounded border ${badgeClass}">
+                <div class="col-12 col-sm-4 small fw-semibold text-truncate" title="${p.label}">
+                    ${p.label}
                 </div>
-            `).join('');
+                <div class="col-7 col-sm-5">
+                    <select class="form-select form-select-sm" onchange="onPerceptionTaxChange(${i}, this.value)">
+                        ${options}
+                    </select>
+                </div>
+                <div class="col-4 col-sm-2">
+                    <input type="number" step="0.01" class="form-control form-control-sm text-end fw-bold"
+                        value="${p.amount}" onchange="state.perceptions[${i}].amount = parseFloat(this.value || 0);">
+                </div>
+                <div class="col-1 text-end">
+                    <button type="button" class="btn btn-outline-danger btn-sm py-0 px-1" onclick="state.perceptions.splice(${i},1); renderPerceptions();">×</button>
+                </div>
+            </div>
+        `;
+            }).join('');
+
+            if (!state.perceptions.length) {
+                rowsHtml = `<div class="text-muted small mb-2">No se detectaron percepciones en el pie de la factura.</div>`;
+            }
+
+            box.innerHTML = rowsHtml + `
+        <button type="button" class="btn btn-outline-secondary btn-sm mt-1"
+            onclick="state.perceptions.push({label:'Percepción manual', amount:0, tax_id:null, tax_name:''}); renderPerceptions();">
+            + Agregar percepción manual
+        </button>
+    `;
+        }
+
+        function onPerceptionTaxChange(idx, val) {
+            const tid = val ? parseInt(val) : null;
+            const found = state.perceptionTaxes.find(t => t.id === tid);
+            state.perceptions[idx].tax_id = tid;
+            state.perceptions[idx].tax_name = found ? found.name : '';
+            renderPerceptions();
         }
 
         function updateTotalsSummary() {
