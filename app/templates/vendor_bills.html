@@ -351,7 +351,7 @@
                                 </div>
                                 <div id="rounding-adj-row"
                                     class="d-flex justify-content-between small mb-1 text-primary d-none">
-                                    <span>+ Línea Ajuste Redondeo (÷ 1,21):</span>
+                                    <span>Ajuste Redondeo:</span>
                                     <strong id="calc-rounding-adj">0.00</strong>
                                 </div>
                                 <div class="d-flex justify-content-between small mb-2 border-bottom pb-2">
@@ -535,6 +535,7 @@
             renderLinesTable();
             renderPerceptions();
             updateTotalsSummary();
+
         }
 
         async function rematchWithOdoo() {
@@ -840,21 +841,18 @@
                 return { netSum: 0, adjNet: 0, finalGrandTotal: 0 };
             }
 
-            // Sumar Neto e IVA por alícuota tal como lo calcula Odoo
-            const baseByRate = {};
+            // Odoo por defecto redondea el IVA línea por línea (round_per_line)
             let netSum = 0;
+            let calcVat = 0;
             state.lines.forEach(ln => {
                 const sub = +(ln.quantity * ln.unit_price * (1 - (ln.discount_percentage || 0) / 100)).toFixed(2);
                 netSum = +(netSum + sub).toFixed(2);
+
                 const tid = (ln.tax_ids || [])[0];
                 const tObj = state.vatTaxes.find(x => x.id === tid);
                 const rate = tObj ? parseFloat(tObj.amount || 0) : 21.0;
-                baseByRate[rate] = +((baseByRate[rate] || 0) + sub).toFixed(2);
-            });
-
-            let calcVat = 0;
-            Object.entries(baseByRate).forEach(([rateStr, baseAmt]) => {
-                calcVat = +(calcVat + +(baseAmt * (parseFloat(rateStr) / 100)).toFixed(2)).toFixed(2);
+                const lineVat = +(sub * (rate / 100)).toFixed(2);
+                calcVat = +(calcVat + lineVat).toFixed(2);
             });
 
             const percSum = +(state.perceptions.reduce((acc, p) => acc + parseFloat(p.amount || 0), 0)).toFixed(2);
@@ -863,32 +861,29 @@
 
             const diffTotal = +(pdfTotal - currentGrandTotal).toFixed(2);
             let adjNet = 0;
+            let adjVat = 0;
+
             if (Math.abs(diffTotal) >= 0.01) {
-                // Dividir la diferencia total por 1.21 y ajustar +-1 centavo si el redondeo de 21% se pasa por 0.01
                 const rawAdj = +(diffTotal / 1.21).toFixed(2);
                 adjNet = rawAdj;
-                const base21 = baseByRate[21] || 0;
-                const vatWithout21 = +(calcVat - +(base21 * 0.21).toFixed(2)).toFixed(2);
+                adjVat = +(adjNet * 0.21).toFixed(2);
 
-                for (const delta of [0, -0.01, 0.01, -0.02, 0.02]) {
-                    const cand = +(rawAdj + delta).toFixed(2);
-                    const newVat21 = +((base21 + cand) * 0.21).toFixed(2);
-                    const simTotal = +((netSum + cand) + vatWithout21 + newVat21 + percSum + exemptAmt).toFixed(2);
+                // Probar +-1 y +-2 centavos evaluando el IVA propio de la línea de ajuste (igual que hace Odoo)
+                for (const delta of [0, 0.01, -0.01, 0.02, -0.02]) {
+                    const candNet = +(rawAdj + delta).toFixed(2);
+                    const candVat = +(candNet * 0.21).toFixed(2);
+                    const simTotal = +(currentGrandTotal + candNet + candVat).toFixed(2);
                     if (Math.abs(simTotal - pdfTotal) < 0.005) {
-                        adjNet = cand;
+                        adjNet = candNet;
+                        adjVat = candVat;
                         break;
                     }
                 }
             }
 
-            const finalBase21 = (baseByRate[21] || 0) + adjNet;
-            const finalVat = +(Object.entries({ ...baseByRate, 21: finalBase21 })
-                .reduce((acc, [r, b]) => acc + +(b * (parseFloat(r) / 100)).toFixed(2), 0)).toFixed(2);
-            const finalGrandTotal = +(netSum + adjNet + finalVat + percSum + exemptAmt).toFixed(2);
-
+            const finalGrandTotal = +(currentGrandTotal + adjNet + adjVat).toFixed(2);
             return { netSum, adjNet, finalGrandTotal };
         }
-
         function renderPerceptions() {
             const box = document.getElementById('perceptions-box');
             const curr = document.getElementById('hdr-currency').value || 'ARS';
@@ -916,7 +911,7 @@
                         value="${p.amount}" onchange="state.perceptions[${i}].amount = parseFloat(this.value || 0);">
                 </div>
                 <div class="col-1 text-end">
-                    <button type="button" class="btn btn-outline-danger btn-sm py-0 px-1" onclick="state.perceptions.splice(${i},1); renderPerceptions();">×</button>
+                    <button type="button" class="btn btn-outline-danger btn-sm py-0 px-1" onclick="state.perceptions.splice(${i},1); renderPerceptions(); updateTotalsSummary();">×</button>
                 </div>
             </div>
         `;
@@ -928,7 +923,7 @@
 
             box.innerHTML = rowsHtml + `
         <button type="button" class="btn btn-outline-secondary btn-sm mt-1"
-            onclick="state.perceptions.push({label:'Percepción manual', amount:0, tax_id:null, tax_name:''}); renderPerceptions();">
+            onclick="state.perceptions.push({label:'Percepción manual', amount:0, tax_id:null, tax_name:''}); renderPerceptions(); updateTotalsSummary();">
             + Agregar percepción manual
         </button>
     `;
