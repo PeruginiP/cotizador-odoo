@@ -1113,7 +1113,7 @@ def _read_purchase_orders_with_lines(models, db, uid, password, po_records: list
     if tax_ids:
         taxes = models.execute_kw(
             db, uid, password, "account.tax", "read", [list(tax_ids)],
-            {"fields": ["id", "name", "amount"], "context": ctx}
+            {"fields": ["id", "name", "amount", "description"], "context": ctx}
         )
         tax_map = {int(t["id"]): t for t in taxes}
 
@@ -1125,11 +1125,6 @@ def _read_purchase_orders_with_lines(models, db, uid, password, po_records: list
             rl = lines_by_id.get(int(lid))
             if not rl or rl.get("display_type"):
                 continue
-            t_labels = []
-            for t in t_list:
-                if t in tax_map:
-                    amt = float(tax_map[t].get("amount") or 0.0)
-                    t_labels.append(f"{amt:g}%" if amt > 0 else (tax_map[t].get("description") or "0%"))
             pid = int(rl["product_id"][0]) if isinstance(rl.get("product_id"), list) else None
             p_info = prod_map.get(pid, {})
             v_codes = list(dict.fromkeys(
@@ -1137,8 +1132,13 @@ def _read_purchase_orders_with_lines(models, db, uid, password, po_records: list
                 supplier_codes_by_prod.get((pid, 0), [])
             )) if pid else []
 
+            # Primero definimos t_list y después armamos t_labels
             t_list = [int(t) for t in (rl.get("taxes_id") or [])]
-            t_names = [tax_map[t]["name"] for t in t_list if t in tax_map]
+            t_labels = []
+            for t in t_list:
+                if t in tax_map:
+                    amt = float(tax_map[t].get("amount") or 0.0)
+                    t_labels.append(f"{amt:g}%" if amt > 0 else (tax_map[t].get("description") or "0%"))
 
             qty_ordered = float(rl.get("product_qty") or 0.0)
             qty_invoiced = float(rl.get("qty_invoiced") or 0.0)
@@ -1711,11 +1711,6 @@ def auto_match_invoice_lines_to_pos(
 
             
             # Comparación de precio neto efectivo (considerando descuento global como el 44.79% de Micro Control)
-            pl_eff_price = float(pl["price_unit"] or 0.0) * (1.0 - float(pl.get("discount") or 0.0) / 100.0)
-            price_bonus = 0.0
-            if pl_eff_price > 0 and inv_eff_price > 0:
-                if abs(inv_eff_price - pl_eff_price) / pl_eff_price <= 0.03:
-                    price_bonus = 0.12
 
             # Puntaje ponderado final
             total_score = (code_sim * 0.65) + (desc_sim * 0.25) + qty_bonus + price_bonus
@@ -1988,13 +1983,7 @@ def create_draft_vendor_bill(
         {"fields": ["id", "name"], "limit": 1, "context": ctx},
     )
     currency_id = int(currs[0]["id"]) if currs else None
-    sec_curr_id = header.get("secondary_currency_id")
-    comp_rate = float(header.get("comparison_rate") or 0.0)
-    if curr_code == "ARS" and sec_curr_id and comp_rate > 1.0:
-        if "move_currency_id" in am_meta:
-            move_vals["move_currency_id"] = int(sec_curr_id)
-        if "move_inverse_currency_rate" in am_meta:
-            move_vals["move_inverse_currency_rate"] = comp_rate
+    
 
     
     journals = models.execute_kw(
@@ -2060,6 +2049,13 @@ def create_draft_vendor_bill(
         move_vals["journal_id"] = journal_id
     if currency_id:
         move_vals["currency_id"] = currency_id
+    sec_curr_id = header.get("secondary_currency_id")
+    comp_rate = float(header.get("comparison_rate") or 0.0)
+    if curr_code == "ARS" and sec_curr_id and comp_rate > 1.0:
+        if "move_currency_id" in am_meta:
+            move_vals["move_currency_id"] = int(sec_curr_id)
+        if "move_inverse_currency_rate" in am_meta:
+            move_vals["move_inverse_currency_rate"] = comp_rate
     if header.get("invoice_date"):
         move_vals["invoice_date"] = header["invoice_date"]
         move_vals["date"] = header["invoice_date"]

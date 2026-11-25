@@ -580,7 +580,7 @@ def api_rematch_vendor_bill(payload: RematchBillIn, user: dict = Depends(get_cur
 
         # 3. Impuestos y re-cruce de líneas y percepciones
         tax_opts = get_purchase_tax_options(payload.company_id, allowed)
-        sec_info = resolve_secondary_currency_and_rate(company_id, allowed, header, purchase_orders)  # (usar payload.company_id en rematch)
+        sec_info = resolve_secondary_currency_and_rate(payload.company_id, allowed, header, purchase_orders)        
         header.update(sec_info)
         matched_lines = auto_match_invoice_lines_to_pos(
             payload.lines,
