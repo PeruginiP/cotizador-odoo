@@ -982,3 +982,574 @@ def save_quotation(
         "action_label": action_label,
         "odoo_link": f"{url}/web#id={target_order_id}&model=sale.order&view_type=form",
     }
+
+
+
+import re
+import base64
+from difflib import SequenceMatcher
+
+
+def _clean_cuit(val: str) -> str:
+    return re.sub(r"\D", "", val or "")
+
+
+def find_vendor_by_cuit_or_name(cuit: str, name: str, company_id: int, allowed_company_ids: list):
+    _, db, uid, password, models = _get_odoo_service_connection()
+    hierarchy_ids = _get_company_hierarchy(models, db, uid, password, int(company_id), allowed_company_ids)
+    full_allowed = list(dict.fromkeys([int(company_id)] + hierarchy_ids + [int(x) for x in allowed_company_ids]))
+    ctx = _make_company_context(int(company_id), full_allowed)
+
+    comp_domain = ["|", ("company_id", "=", False), ("company_id", "in", hierarchy_ids)]
+    fields = ["id", "name", "vat", "parent_id", "supplier_rank"]
+
+    digits = _clean_cuit(cuit)
+    if len(digits) >= 8:
+        formatted = f"{digits[:2]}-{digits[2:10]}-{digits[10:]}" if len(digits) == 11 else cuit
+        vat_domain = comp_domain + [
+            ("parent_id", "=", False),
+            "|", "|",
+            ("vat", "ilike", digits),
+            ("vat", "ilike", formatted),
+            ("vat", "ilike", f"AR{digits}"),
+        ]
+        found = models.execute_kw(
+            db, uid, password, "res.partner", "search_read",
+            [vat_domain], {"fields": fields, "limit": 5, "order": "supplier_rank desc, id asc", "context": ctx}
+        )
+        if found:
+            p = found[0]
+            return {"id": int(p["id"]), "name": p["name"], "vat": p.get("vat") or ""}
+
+    if name and len(name.strip()) >= 3:
+        name_domain = comp_domain + [("parent_id", "=", False), ("name", "ilike", name.strip()[:35])]
+        found = models.execute_kw(
+            db, uid, password, "res.partner", "search_read",
+            [name_domain], {"fields": fields, "limit": 5, "order": "supplier_rank desc, id asc", "context": ctx}
+        )
+        if found:
+            p = found[0]
+            return {"id": int(p["id"]), "name": p["name"], "vat": p.get("vat") or ""}
+
+    return None
+
+
+def _read_purchase_orders_with_lines(models, db, uid, password, po_records: list, ctx: dict) -> list:
+    if not po_records:
+        return []
+
+    all_line_ids = []
+    for po in po_records:
+        all_line_ids.extend(po.get("order_line") or [])
+
+    lines_by_id = {}
+    prod_ids = set()
+    tax_ids = set()
+
+    if all_line_ids:
+        pol_meta = models.execute_kw(db, uid, password, "purchase.order.line", "fields_get", [[]], {"attributes": ["type"]})
+        pol_fields = ["id", "order_id", "sequence", "display_type", "product_id", "name", "product_qty", "qty_received", "qty_invoiced", "price_unit", "price_subtotal", "taxes_id"]
+        if "discount" in pol_meta:
+            pol_fields.append("discount")
+
+        raw_lines = models.execute_kw(
+            db, uid, password, "purchase.order.line", "read", [all_line_ids], {"fields": pol_fields, "context": ctx}
+        )
+        for rl in raw_lines:
+            lines_by_id[int(rl["id"])] = rl
+            if isinstance(rl.get("product_id"), list):
+                prod_ids.add(int(rl["product_id"][0]))
+            for tid in (rl.get("taxes_id") or []):
+                tax_ids.add(int(tid))
+
+    prod_map = {}
+    if prod_ids:
+        prods = models.execute_kw(
+            db, uid, password, "product.product", "read", [list(prod_ids)],
+            {"fields": ["id", "default_code", "name", "barcode"], "context": ctx}
+        )
+        prod_map = {int(p["id"]): p for p in prods}
+
+    tax_map = {}
+    if tax_ids:
+        taxes = models.execute_kw(
+            db, uid, password, "account.tax", "read", [list(tax_ids)],
+            {"fields": ["id", "name", "amount"], "context": ctx}
+        )
+        tax_map = {int(t["id"]): t for t in taxes}
+
+    out = []
+    for po in po_records:
+        po_lines = []
+        for lid in (po.get("order_line") or []):
+            rl = lines_by_id.get(int(lid))
+            if not rl or rl.get("display_type"):
+                continue
+            pid = int(rl["product_id"][0]) if isinstance(rl.get("product_id"), list) else None
+            p_info = prod_map.get(pid, {})
+            t_list = [int(t) for t in (rl.get("taxes_id") or [])]
+            t_names = [tax_map[t]["name"] for t in t_list if t in tax_map]
+
+            qty_ordered = float(rl.get("product_qty") or 0.0)
+            qty_invoiced = float(rl.get("qty_invoiced") or 0.0)
+            qty_pending = round(max(qty_ordered - qty_invoiced, 0.0), 4)
+
+            po_lines.append({
+                "po_line_id": int(rl["id"]),
+                "po_id": int(po["id"]),
+                "po_name": po["name"],
+                "product_id": pid,
+                "default_code": p_info.get("default_code") or "",
+                "product_name": p_info.get("name") or (rl["product_id"][1] if isinstance(rl.get("product_id"), list) else ""),
+                "description": rl.get("name") or "",
+                "product_qty": qty_ordered,
+                "qty_received": float(rl.get("qty_received") or 0.0),
+                "qty_invoiced": qty_invoiced,
+                "qty_pending": qty_pending,
+                "price_unit": float(rl.get("price_unit") or 0.0),
+                "discount": float(rl.get("discount") or 0.0),
+                "price_subtotal": float(rl.get("price_subtotal") or 0.0),
+                "tax_ids": t_list,
+                "tax_names": ", ".join(t_names) if t_names else "Sin IVA",
+            })
+
+        curr_name = po["currency_id"][1] if isinstance(po.get("currency_id"), list) else "ARS"
+        partner_name = po["partner_id"][1] if isinstance(po.get("partner_id"), list) else ""
+        partner_id = int(po["partner_id"][0]) if isinstance(po.get("partner_id"), list) else None
+
+        out.append({
+            "id": int(po["id"]),
+            "name": po["name"],
+            "partner_id": partner_id,
+            "partner_name": partner_name,
+            "partner_ref": po.get("partner_ref") or "",
+            "date_order": str(po.get("date_order") or "")[:10],
+            "currency": curr_name,
+            "amount_untaxed": float(po.get("amount_untaxed") or 0.0),
+            "amount_tax": float(po.get("amount_tax") or 0.0),
+            "amount_total": float(po.get("amount_total") or 0.0),
+            "invoice_status": po.get("invoice_status") or "",
+            "state": po.get("state") or "",
+            "lines": po_lines,
+        })
+    return out
+
+
+def search_purchase_orders_for_bill(
+    company_id: int,
+    allowed_company_ids: list,
+    po_references: list = None,
+    partner_id: int = None,
+    query: str = "",
+    limit: int = 15,
+) -> list:
+    _, db, uid, password, models = _get_odoo_service_connection()
+    ctx = _make_company_context(int(company_id), allowed_company_ids)
+
+    po_fields = [
+        "id", "name", "partner_id", "partner_ref", "date_order",
+        "currency_id", "amount_untaxed", "amount_tax", "amount_total",
+        "state", "invoice_status", "order_line",
+    ]
+    base_domain = [("company_id", "=", int(company_id)), ("state", "in", ["purchase", "done"])]
+
+    # 1. Búsqueda libre manual desde el buscador del frontend
+    if query and query.strip():
+        q = query.strip()
+        dom = base_domain + [
+            "|", "|",
+            ("name", "ilike", q),
+            ("partner_ref", "ilike", q),
+            ("partner_id.name", "ilike", q),
+        ]
+        if partner_id:
+            dom = [("partner_id", "child_of", int(partner_id))] + dom
+        recs = models.execute_kw(
+            db, uid, password, "purchase.order", "search_read",
+            [dom], {"fields": po_fields, "order": "id desc", "limit": limit, "context": ctx}
+        )
+        return _read_purchase_orders_with_lines(models, db, uid, password, recs, ctx)
+
+    # 2. Búsqueda automática por referencias extraídas en el PDF
+    matched_recs = []
+    seen_ids = set()
+    for ref in (po_references or []):
+        clean_ref = ref.strip()
+        if not clean_ref:
+            continue
+        digits_only = re.sub(r"\D", "", clean_ref)
+        or_conds = [("name", "ilike", clean_ref), ("partner_ref", "ilike", clean_ref)]
+        if digits_only and len(digits_only) >= 3:
+            or_conds.append(("name", "ilike", digits_only))
+        dom = base_domain + (["|"] * (len(or_conds) - 1)) + or_conds
+        if partner_id:
+            dom_with_vendor = [("partner_id", "child_of", int(partner_id))] + dom
+            recs = models.execute_kw(
+                db, uid, password, "purchase.order", "search_read",
+                [dom_with_vendor], {"fields": po_fields, "order": "id desc", "limit": 5, "context": ctx}
+            )
+            if not recs:
+                recs = models.execute_kw(
+                    db, uid, password, "purchase.order", "search_read",
+                    [dom], {"fields": po_fields, "order": "id desc", "limit": 5, "context": ctx}
+                )
+        else:
+            recs = models.execute_kw(
+                db, uid, password, "purchase.order", "search_read",
+                [dom], {"fields": po_fields, "order": "id desc", "limit": 5, "context": ctx}
+            )
+        for r in recs:
+            if int(r["id"]) not in seen_ids:
+                seen_ids.add(int(r["id"]))
+                matched_recs.append(r)
+
+    if matched_recs:
+        return _read_purchase_orders_with_lines(models, db, uid, password, matched_recs, ctx)
+
+    # 3. Fallback: si el PDF no tenía número de OC pero encontramos el proveedor, traer sus OC pendientes de facturar
+    if partner_id:
+        fallback_dom = base_domain + [
+            ("partner_id", "child_of", int(partner_id)),
+            ("invoice_status", "!=", "invoiced"),
+        ]
+        recs = models.execute_kw(
+            db, uid, password, "purchase.order", "search_read",
+            [fallback_dom], {"fields": po_fields, "order": "id desc", "limit": 8, "context": ctx}
+        )
+        return _read_purchase_orders_with_lines(models, db, uid, password, recs, ctx)
+
+    return []
+
+
+def get_purchase_tax_options(company_id: int, allowed_company_ids: list) -> dict:
+    """Devuelve impuestos de compra y percepciones disponibles en Odoo para esa empresa."""
+    _, db, uid, password, models = _get_odoo_service_connection()
+    hierarchy_ids = _get_company_hierarchy(models, db, uid, password, int(company_id), allowed_company_ids)
+    ctx = _make_company_context(int(company_id), allowed_company_ids)
+
+    taxes = models.execute_kw(
+        db, uid, password, "account.tax", "search_read",
+        [[
+            ("type_tax_use", "=", "purchase"),
+            ("active", "=", True),
+            ("company_id", "in", hierarchy_ids),
+        ]],
+        {"fields": ["id", "name", "amount", "amount_type", "tax_group_id"], "order": "sequence asc, id asc", "context": ctx}
+    )
+
+    vat_taxes = []
+    perception_taxes = []
+    for t in taxes:
+        grp_name = (t["tax_group_id"][1] if isinstance(t.get("tax_group_id"), list) else "").lower()
+        t_name = (t.get("name") or "").lower()
+        item = {"id": int(t["id"]), "name": t["name"], "amount": float(t.get("amount") or 0.0)}
+        if "perc" in t_name or "iibb" in t_name or "ingresos brutos" in t_name or "perc" in grp_name or "rg " in t_name:
+            perception_taxes.append(item)
+        else:
+            vat_taxes.append(item)
+
+    return {"vat_taxes": vat_taxes, "perception_taxes": perception_taxes}
+
+
+def auto_match_invoice_lines_to_pos(invoice_lines: list, purchase_orders: list) -> list:
+    """Cruza automáticamente cada línea extraída por Gemini con la mejor línea disponible de las OC seleccionadas."""
+    pool = []
+    for po in purchase_orders:
+        for pl in po.get("lines", []):
+            pool.append(pl)
+
+    used_po_lines = set()
+    matched_out = []
+
+    for inv_ln in invoice_lines:
+        inv_code = (inv_ln.get("product_code") or "").strip().lower()
+        inv_desc = (inv_ln.get("description") or "").strip().lower()
+        inv_qty = float(inv_ln.get("quantity") or 0.0)
+        inv_price = float(inv_ln.get("unit_price") or 0.0)
+
+        best_pl = None
+        best_score = 0.0
+
+        for pl in pool:
+            pl_id = pl["po_line_id"]
+            pl_code = (pl.get("default_code") or "").strip().lower()
+            pl_desc = f"{pl.get('product_name', '')} {pl.get('description', '')}".strip().lower()
+
+            score = 0.0
+            if inv_code and pl_code and (inv_code == pl_code or inv_code in pl_code or pl_code in inv_code):
+                score += 0.65
+            elif inv_code and inv_code in pl_desc:
+                score += 0.50
+
+            if inv_desc and pl_desc:
+                score += SequenceMatcher(None, inv_desc, pl_desc).ratio() * 0.45
+
+            # Bonus por coincidencia de cantidad pendiente o precio cercano
+            ref_qty = pl["qty_pending"] if pl["qty_pending"] > 0 else pl["product_qty"]
+            if ref_qty > 0 and abs(inv_qty - ref_qty) / max(ref_qty, 1.0) <= 0.05:
+                score += 0.15
+            if pl["price_unit"] > 0 and abs(inv_price - pl["price_unit"]) / pl["price_unit"] <= 0.05:
+                score += 0.15
+
+            if pl_id in used_po_lines:
+                score -= 0.25
+
+            if score > best_score:
+                best_score = score
+                best_pl = pl
+
+        if best_pl and best_score >= 0.28:
+            used_po_lines.add(best_pl["po_line_id"])
+            matched_out.append({
+                **inv_ln,
+                "matched_po_line_id": best_pl["po_line_id"],
+                "matched_po_name": best_pl["po_name"],
+                "product_id": best_pl["product_id"],
+                "odoo_product_label": f"[{best_pl['default_code']}] {best_pl['product_name']}" if best_pl.get("default_code") else best_pl["product_name"],
+                "po_qty_pending": best_pl["qty_pending"],
+                "po_price_unit": best_pl["price_unit"],
+                "po_discount": best_pl["discount"],
+                "tax_ids": best_pl["tax_ids"],
+                "tax_names": best_pl["tax_names"],
+                "match_confidence": round(min(best_score, 1.0) * 100),
+            })
+        else:
+            matched_out.append({
+                **inv_ln,
+                "matched_po_line_id": None,
+                "matched_po_name": "",
+                "product_id": None,
+                "odoo_product_label": "",
+                "po_qty_pending": None,
+                "po_price_unit": None,
+                "po_discount": None,
+                "tax_ids": [],
+                "tax_names": "Seleccionar IVA",
+                "match_confidence": 0,
+            })
+
+    return matched_out
+
+
+def create_draft_vendor_bill(
+    company_id: int,
+    allowed_company_ids: list,
+    partner_id: int,
+    header: dict,
+    lines: list,
+    perceptions: list,
+    creator_user: dict,
+    attachment_b64: str = None,
+    attachment_filename: str = None,
+    attachment_mimetype: str = None,
+) -> dict:
+    url, db, uid, password, models = _get_odoo_service_connection()
+    ctx = _make_company_context(int(company_id), allowed_company_ids)
+
+    doc_type_str = (header.get("document_type") or "FACTURA").upper()
+    move_type = "in_refund" if "CREDITO" in doc_type_str or "CRÉDITO" in doc_type_str else "in_invoice"
+
+    am_meta = models.execute_kw(db, uid, password, "account.move", "fields_get", [[]], {"attributes": ["type", "relation"]})
+    aml_meta = models.execute_kw(db, uid, password, "account.move.line", "fields_get", [[]], {"attributes": ["type"]})
+
+    # 1. Resolver moneda
+    curr_code = (header.get("currency") or "ARS").upper()
+    currs = models.execute_kw(
+        db, uid, password, "res.currency", "search_read",
+        [[("name", "=", curr_code), "|", ("active", "=", True), ("active", "=", False)]],
+        {"fields": ["id", "name"], "limit": 1, "context": ctx}
+    )
+    currency_id = int(currs[0]["id"]) if currs else None
+
+    # 2. Resolver Diario de Compras de la compañía
+    journals = models.execute_kw(
+        db, uid, password, "account.journal", "search_read",
+        [[("company_id", "=", int(company_id)), ("type", "=", "purchase")]],
+        {"fields": ["id", "name"], "order": "sequence asc, id asc", "limit": 1, "context": ctx}
+    )
+    journal_id = int(journals[0]["id"]) if journals else None
+
+    # 3. Resolver Tipo de Comprobante AFIP/ARCA (l10n_latam.document.type)
+    latam_doc_type_id = None
+    letter = (header.get("invoice_letter") or "A").upper()
+    if "l10n_latam_document_type_id" in am_meta:
+        try:
+            doc_keyword = "Nota de Crédito" if move_type == "in_refund" else ("Nota de Débito" if "DEBITO" in doc_type_str else "Factura")
+            dtypes = models.execute_kw(
+                db, uid, password, "l10n_latam.document.type", "search_read",
+                [[
+                    ("active", "=", True),
+                    ("internal_type", "in", ["invoice", "credit_note", "debit_note"]),
+                    ("doc_code_prefix", "ilike", letter),
+                    ("name", "ilike", doc_keyword),
+                ]],
+                {"fields": ["id", "name", "code"], "limit": 5, "context": ctx}
+            )
+            if dtypes:
+                latam_doc_type_id = int(dtypes[0]["id"])
+        except Exception:
+            pass
+
+    # 4. Construir líneas de factura (heredando purchase_line_id e impuestos)
+    invoice_line_cmds = []
+    linked_po_names = set()
+
+    for idx, ln in enumerate(lines):
+        vals = {
+            "sequence": (idx + 1) * 10,
+            "name": str(ln.get("description") or "Ítem facturado"),
+            "quantity": float(ln.get("quantity") or 1.0),
+            "price_unit": float(ln.get("unit_price") or 0.0),
+        }
+        if "discount" in aml_meta:
+            vals["discount"] = float(ln.get("discount_percentage") or 0.0)
+        if ln.get("product_id"):
+            vals["product_id"] = int(ln["product_id"])
+        if ln.get("purchase_line_id") and "purchase_line_id" in aml_meta:
+            vals["purchase_line_id"] = int(ln["purchase_line_id"])
+        if ln.get("po_name"):
+            linked_po_names.add(str(ln["po_name"]))
+        if ln.get("tax_ids") is not None:
+            tax_field = "tax_ids" if "tax_ids" in aml_meta else "invoice_line_tax_ids"
+            vals[tax_field] = [(6, 0, [int(t) for t in ln["tax_ids"] if t])]
+
+        invoice_line_cmds.append((0, 0, vals))
+
+    # 5. Si el usuario asignó percepciones con impuesto/importe explícito, sumarlas como apuntes de control o nota
+    perceptions_summary_html = ""
+    if perceptions:
+        li_items = []
+        for p in perceptions:
+            lbl = p.get("label") or "Percepción"
+            amt = float(p.get("amount") or 0.0)
+            tax_id = p.get("tax_id")
+            li_items.append(f"<li>{lbl}: <strong>{curr_code} {amt:,.2f}</strong></li>")
+            # Si seleccionó un impuesto de percepción de compra y monto > 0, podemos cargarlo si es impuesto fijo/base
+            if tax_id and amt > 0 and p.get("add_as_line"):
+                tax_field = "tax_ids" if "tax_ids" in aml_meta else "invoice_line_tax_ids"
+                invoice_line_cmds.append((0, 0, {
+                    "sequence": 900 + idx,
+                    "name": f"Percepción / Tributo: {lbl}",
+                    "quantity": 1.0,
+                    "price_unit": amt,
+                    tax_field: [(6, 0, [int(tax_id)])],
+                }))
+        perceptions_summary_html = "<ul>" + "".join(li_items) + "</ul>"
+
+    move_vals = {
+        "move_type": move_type,
+        "company_id": int(company_id),
+        "partner_id": int(partner_id),
+        "invoice_line_ids": invoice_line_cmds,
+    }
+    if journal_id:
+        move_vals["journal_id"] = journal_id
+    if currency_id:
+        move_vals["currency_id"] = currency_id
+    if header.get("invoice_date"):
+        move_vals["invoice_date"] = header["invoice_date"]
+        move_vals["date"] = header["invoice_date"]
+    if header.get("due_date"):
+        move_vals["invoice_date_due"] = header["due_date"]
+
+    inv_num = (header.get("invoice_number") or "").strip()
+    if inv_num:
+        if "l10n_latam_document_number" in am_meta:
+            move_vals["l10n_latam_document_number"] = inv_num
+        move_vals["ref"] = inv_num
+
+    if latam_doc_type_id and "l10n_latam_document_type_id" in am_meta:
+        move_vals["l10n_latam_document_type_id"] = latam_doc_type_id
+
+    if linked_po_names:
+        move_vals["invoice_origin"] = ", ".join(sorted(linked_po_names))
+    elif header.get("purchase_order_number"):
+        move_vals["invoice_origin"] = header["purchase_order_number"]
+
+    # Tipo de cambio impreso en comprobante (localización AR)
+    ex_rate = float(header.get("exchange_rate") or 1.0)
+    if curr_code != "ARS" and ex_rate > 1.0:
+        for rate_field in ["l10n_ar_currency_rate", "manual_currency_rate"]:
+            if rate_field in am_meta:
+                move_vals[rate_field] = ex_rate
+                break
+
+    # CAE si el campo existe en account.move
+    cae = (header.get("cae_number") or "").strip()
+    if cae:
+        for cae_f in ["afip_auth_code", "l10n_ar_afip_auth_code"]:
+            if cae_f in am_meta:
+                move_vals[cae_f] = cae
+                break
+
+    # Crear borrador con fallback si algún campo localizado da validación estricta
+    try:
+        move_id = models.execute_kw(db, uid, password, "account.move", "create", [move_vals], {"context": ctx})
+    except Exception:
+        move_vals.pop("l10n_latam_document_number", None)
+        move_vals.pop("l10n_latam_document_type_id", None)
+        move_id = models.execute_kw(db, uid, password, "account.move", "create", [move_vals], {"context": ctx})
+
+    # Adjuntar el PDF/imagen original al comprobante en Odoo
+    if attachment_b64 and attachment_filename:
+        try:
+            att_id = models.execute_kw(
+                db, uid, password, "ir.attachment", "create",
+                [{
+                    "name": attachment_filename,
+                    "type": "binary",
+                    "datas": attachment_b64,
+                    "res_model": "account.move",
+                    "res_id": int(move_id),
+                    "mimetype": attachment_mimetype or "application/pdf",
+                }],
+                {"context": ctx}
+            )
+            if "message_main_attachment_id" in am_meta and att_id:
+                models.execute_kw(
+                    db, uid, password, "account.move", "write",
+                    [[int(move_id)], {"message_main_attachment_id": int(att_id)}],
+                    {"context": ctx}
+                )
+        except Exception:
+            pass
+
+    # Dejar constancia en el Chatter con totales del PDF y percepciones detectadas
+    creator_name = creator_user.get("name", "Usuario Web")
+    body_html = (
+        f"<p>Factura en borrador generada vía <strong>Portal IA Gemini</strong> por <strong>{creator_name}</strong>.</p>"
+        f"<ul>"
+        f"<li>Comprobante leído: <strong>{doc_type_str} {letter} {inv_num}</strong> (CAE: {cae or 'N/D'})</li>"
+        f"<li>OC vinculadas: <strong>{move_vals.get('invoice_origin') or 'Sin OC'}</strong></li>"
+        f"<li>Neto Gravado PDF: <strong>{curr_code} {float(header.get('net_taxable_base') or 0):,.2f}</strong> | "
+        f"IVA PDF: <strong>{curr_code} {float(header.get('total_vat') or 0):,.2f}</strong> | "
+        f"Percepciones PDF: <strong>{curr_code} {float(header.get('other_taxes_perceptions') or 0):,.2f}</strong> | "
+        f"Total PDF: <strong>{curr_code} {float(header.get('total_amount') or 0):,.2f}</strong></li>"
+        f"</ul>"
+    )
+    if perceptions_summary_html:
+        body_html += f"<p><strong>Detalle de Percepciones detectadas en pie de factura (verificar grilla de impuestos):</strong></p>{perceptions_summary_html}"
+
+    try:
+        post_kw = {"body": body_html, "message_type": "comment", "subtype_xmlid": "mail.mt_note", "context": ctx}
+        if creator_user.get("partner_id"):
+            post_kw["author_id"] = int(creator_user["partner_id"])
+        models.execute_kw(db, uid, password, "account.move", "message_post", [[int(move_id)]], post_kw)
+    except Exception:
+        pass
+
+    created = models.execute_kw(
+        db, uid, password, "account.move", "read",
+        [[int(move_id)]],
+        {"fields": ["name", "ref", "amount_untaxed", "amount_tax", "amount_total", "state"], "context": ctx}
+    )[0]
+
+    return {
+        "move_id": int(move_id),
+        "move_name": created.get("name") or f"Borrador #{move_id}",
+        "ref": created.get("ref") or inv_num,
+        "amount_untaxed": float(created.get("amount_untaxed") or 0.0),
+        "amount_tax": float(created.get("amount_tax") or 0.0),
+        "amount_total": float(created.get("amount_total") or 0.0),
+        "odoo_link": f"{url}/web#id={move_id}&model=account.move&view_type=form",
+    }

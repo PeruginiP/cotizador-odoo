@@ -1,7 +1,9 @@
 import os
 import time
 import threading
-from fastapi import FastAPI, Request, Form, HTTPException, Depends
+import base64
+from fastapi import FastAPI, Request, Form, HTTPException, Depends, UploadFile, File
+from app.invoice_extractor import extract_invoice_with_gemini
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -32,6 +34,11 @@ from app.odoo_client import (
     save_quotation,
     get_quotation_options,
     compute_pricelist_prices_odoo_fallback,
+    find_vendor_by_cuit_or_name,
+    search_purchase_orders_for_bill,
+    get_purchase_tax_options,
+    auto_match_invoice_lines_to_pos,
+    create_draft_vendor_bill,
 )
 
 load_dotenv()
@@ -69,7 +76,7 @@ def validate_user_company(user: dict, company_id: int) -> list:
 @app.get("/login", response_class=HTMLResponse)
 def login_page(request: Request):
     if request.session.get("user"):
-        return RedirectResponse(url="/", status_code=302)
+        return RedirectResponse(url="/menu", status_code=302)
     return templates.TemplateResponse("login.html", {"request": request, "error": None})
 
 @app.post("/login", response_class=HTMLResponse)
@@ -89,7 +96,7 @@ def login_submit(request: Request, username: str = Form(...), password: str = Fo
         odoo_user["is_env_admin"] = False
         login_attempts.pop(client_ip, None)
         request.session["user"] = odoo_user
-        return RedirectResponse(url="/", status_code=302)
+        return RedirectResponse(url="/menu", status_code=302)
 
     expected_user = os.getenv("APP_USER", "")
     expected_pass = os.getenv("APP_PASSWORD", "")
@@ -119,6 +126,52 @@ def login_submit(request: Request, username: str = Form(...), password: str = Fo
 def logout(request: Request):
     request.session.clear()
     return RedirectResponse(url="/login", status_code=302)
+
+@app.get("/", response_class=HTMLResponse)
+def root_redirect(request: Request):
+    if not request.session.get("user"):
+        return RedirectResponse(url="/login", status_code=302)
+    return RedirectResponse(url="/menu", status_code=302)
+
+@app.get("/menu", response_class=HTMLResponse)
+def hub_menu(request: Request):
+    user = request.session.get("user")
+    if not user:
+        return RedirectResponse(url="/login", status_code=302)
+    return templates.TemplateResponse("menu.html", {"request": request, "user": user})
+
+@app.get("/cotizador", response_class=HTMLResponse)
+def cotizador_view(request: Request):
+    user = request.session.get("user")
+    if not user:
+        return RedirectResponse(url="/login", status_code=302)
+    response = templates.TemplateResponse(
+        "index.html",
+        {
+            "request": request,
+            "user": user,
+            "warehouses": get_all_warehouses(),
+            "odoo_url": os.getenv("ODOO_URL", "").rstrip("/"),
+        },
+    )
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    return response
+
+@app.get("/facturas-proveedor", response_class=HTMLResponse)
+def vendor_bills_view(request: Request):
+    user = request.session.get("user")
+    if not user:
+        return RedirectResponse(url="/login", status_code=302)
+    response = templates.TemplateResponse(
+        "vendor_bills.html",
+        {
+            "request": request,
+            "user": user,
+            "odoo_url": os.getenv("ODOO_URL", "").rstrip("/"),
+        },
+    )
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    return response
 
 # --- VISTA PRINCIPAL ---
 @app.get("/", response_class=HTMLResponse)
@@ -360,3 +413,151 @@ def api_save_quotation(payload: QuotationSaveIn, user: dict = Depends(get_curren
         return JSONResponse({"ok": True, **res})
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error al guardar cotización en Odoo: {str(e)}")
+
+    # --- API DE FACTURAS DE PROVEEDOR + CONCILIACIÓN OC ---
+
+@app.get("/api/vendor-bills/options")
+def api_vendor_bill_options(company_id: int, user: dict = Depends(get_current_user)):
+    allowed = validate_user_company(user, company_id)
+    try:
+        return JSONResponse(get_purchase_tax_options(company_id, allowed))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/vendor-bills/extract")
+async def api_extract_vendor_bill(
+    company_id: int = Form(...),
+    file: UploadFile = File(...),
+    user: dict = Depends(get_current_user),
+):
+    allowed = validate_user_company(user, company_id)
+    allowed_mimes = {"application/pdf", "image/jpeg", "image/png", "image/webp"}
+    mime = (file.content_type or "").lower()
+    if mime not in allowed_mimes:
+        raise HTTPException(status_code=400, detail=f"Formato no soportado ({mime}). Subí un PDF, JPG, PNG o WEBP.")
+
+    file_bytes = await file.read()
+    if not file_bytes or len(file_bytes) > 20 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="El archivo está vacío o supera el límite de 20 MB.")
+
+    try:
+        extracted = extract_invoice_with_gemini(file_bytes, mime)
+        header = extracted["header"]
+
+        # 1. Buscar proveedor en Odoo por CUIT o Nombre
+        vendor = find_vendor_by_cuit_or_name(
+            cuit=header.get("vendor_cuit", ""),
+            name=header.get("vendor_name", ""),
+            company_id=company_id,
+            allowed_company_ids=allowed,
+        )
+        partner_id = vendor["id"] if vendor else None
+
+        # 2. Buscar automáticamente Órdenes de Compra asociadas
+        purchase_orders = search_purchase_orders_for_bill(
+            company_id=company_id,
+            allowed_company_ids=allowed,
+            po_references=header.get("po_references", []),
+            partner_id=partner_id,
+        )
+
+        # Si el proveedor no se detectó por CUIT pero sí por el número de OC exacta, heredarlo de la OC
+        if not vendor and purchase_orders and purchase_orders[0].get("partner_id"):
+            vendor = {
+                "id": purchase_orders[0]["partner_id"],
+                "name": purchase_orders[0]["partner_name"],
+                "vat": header.get("vendor_cuit", ""),
+            }
+
+        # 3. Cruzar líneas de factura vs líneas de las OC encontradas
+        matched_lines = auto_match_invoice_lines_to_pos(extracted["lines"], purchase_orders)
+
+        return JSONResponse({
+            "ok": True,
+            "header": header,
+            "vendor": vendor,
+            "purchase_orders": purchase_orders,
+            "lines": matched_lines,
+            "usage": extracted["usage"],
+            "raw_csv": extracted["raw_csv"],
+            "attachment": {
+                "filename": file.filename or "factura_proveedor.pdf",
+                "mimetype": mime,
+                "b64": base64.b64encode(file_bytes).decode("ascii"),
+            },
+        })
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al procesar la factura: {str(e)}")
+
+
+@app.get("/api/vendor-bills/purchase-orders")
+def api_search_pos_manual(
+    company_id: int,
+    q: str = "",
+    partner_id: Optional[int] = None,
+    user: dict = Depends(get_current_user),
+):
+    allowed = validate_user_company(user, company_id)
+    try:
+        pos = search_purchase_orders_for_bill(
+            company_id=company_id,
+            allowed_company_ids=allowed,
+            partner_id=partner_id,
+            query=q,
+        )
+        return JSONResponse(pos)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class BillLineIn(BaseModel):
+    description: str
+    product_id: Optional[int] = None
+    purchase_line_id: Optional[int] = None
+    po_name: Optional[str] = ""
+    quantity: float = 1.0
+    unit_price: float = 0.0
+    discount_percentage: float = 0.0
+    tax_ids: List[int] = []
+
+
+class PerceptionLineIn(BaseModel):
+    label: str
+    amount: float = 0.0
+    tax_id: Optional[int] = None
+    add_as_line: bool = False
+
+
+class CreateDraftBillIn(BaseModel):
+    company_id: int
+    partner_id: int
+    header: dict
+    lines: List[BillLineIn]
+    perceptions: List[PerceptionLineIn] = []
+    attachment_b64: Optional[str] = None
+    attachment_filename: Optional[str] = None
+    attachment_mimetype: Optional[str] = None
+
+
+@app.post("/api/vendor-bills/create-draft")
+def api_create_draft_bill(payload: CreateDraftBillIn, user: dict = Depends(get_current_user)):
+    allowed = validate_user_company(user, payload.company_id)
+    if not payload.lines:
+        raise HTTPException(status_code=400, detail="La factura debe contener al menos una línea.")
+    try:
+        res = create_draft_vendor_bill(
+            company_id=payload.company_id,
+            allowed_company_ids=allowed,
+            partner_id=payload.partner_id,
+            header=payload.header,
+            lines=[ln.model_dump() for ln in payload.lines],
+            perceptions=[p.model_dump() for p in payload.perceptions],
+            creator_user=user,
+            attachment_b64=payload.attachment_b64,
+            attachment_filename=payload.attachment_filename,
+            attachment_mimetype=payload.attachment_mimetype,
+        )
+        return JSONResponse({"ok": True, **res})
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al crear factura en Odoo: {str(e)}")
