@@ -515,7 +515,10 @@ async def api_extract_vendor_bill(
             },
         })
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error al procesar la factura: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        err_msg = str(e).strip() or repr(e)
+        raise HTTPException(status_code=500, detail=f"Error al procesar la factura ({type(e).__name__}): {err_msg}")
 
 
 @app.get("/api/vendor-bills/purchase-orders")

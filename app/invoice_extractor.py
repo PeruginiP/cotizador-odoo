@@ -6,10 +6,8 @@ import time
 from datetime import datetime, timedelta
 from google import genai
 from google.genai import types
-from google.genai import errors as genai_errors
 
-SYSTEM_PROMPT = """
-# ROL Y OBJETIVO
+SYSTEM_PROMPT = """# ROL Y OBJETIVO
 Eres un especialista en extracción de datos contables argentinos (normativa AFIP/ARCA) e integración ERP con Odoo. Tu tarea es extraer datos de facturas de proveedores y estructurarlos en un formato CSV estricto, diseñado para conciliar facturas contra Órdenes de Compra (OC) preexistentes en Odoo.
 
 # REGLAS CRÍTICAS DE NEGOCIO Y EXTRACCIÓN
@@ -19,7 +17,7 @@ Eres un especialista en extracción de datos contables argentinos (normativa AFI
    - Ignora por completo el CUIT y razón social del receptor/cliente ("Señor/es", "Destinatario").
 
 2. **VENCIMIENTO DE PAGO vs. VENCIMIENTO DE CAE (REGLA DE UBICACIÓN FÍSICA):**
-   - **TRAMPA COMÚN EN ARGENTINA:** En el tercio inferior / pie de página de las facturas electrónicas aparece el número de `C.A.E.` y justo al lado o debajo dice **"Vencimiento XX/XX/XXXX"** (suele ser entre 10 y 11 días después de la fecha de emisión). **ESA FECHA ES EL VENCIMIENTO DEL CAE DE AFIP, NO EL VENCIMIENTO DE PAGO.** Está TERMINANTEMENTE PROHIBIDO poner esa fecha del pie en `due_date`.
+   - **TRAMPA COMÚN EN ARGENTINA:** En el tercio inferior / pie de página de las facturas electrónicas aparece el número de `C.A.E.` y justo al lado o debajo dice **"Vencimiento XX/XX/XXXX"** (suele ser entre 10 y 11 días después de la fecha de emisión). **ESA FECHA ES EL VENCIMIENTO DEL CAE DE AFIP, NO EL VENCIMIENTO DE PAGO.** Está TERMINANTEMENTEMENTE PROHIBIDO poner esa fecha del pie en `due_date`.
    - Solo completa `due_date` si en el **ENCABEZADO SUPERIOR** existe un recuadro explícito de "Vencimiento de Pago" con una fecha impresa distinta al Vto. del CAE. Si en el encabezado solo dice `Condiciones de venta: 30 días Fecha Factura` (sin fecha calendario impresa arriba), deja `due_date` **VACÍO (`""`)** y copia el texto exacto en `payment_terms`.
 
 3. **ORDEN DE COMPRA LIMPIA (`purchase_order_number`):**
@@ -28,13 +26,14 @@ Eres un especialista en extracción de datos contables argentinos (normativa AFI
 
 4. **DESCUENTO GLOBAL EN PIE DE PÁGINA (`global_discount_amount`):**
    - Si las líneas no tienen descuento individual (`0.0`), pero en el pie antes del SUBTOTAL / IVA hay un renglón `DESCUENTOS` (ej: `DESCUENTOS $ 11,751,864.46` / `44.79%`), coloca ese monto exacto (`11751864.46`) en `global_discount_amount` y coloca la suma bruta de líneas en `gross_subtotal` y el subtotal restado en `net_taxable_base`.
-5. **TRATAMIENTO DE LÍNEAS Y PRECIOS (SIN IVA):**
-   - Crea una fila en el CSV por cada línea de producto/servicio facturado. Ignora líneas meramente informativas ("Son pesos...", textos legales) salvo que aporten el número de OC.
+
+5. **TRATAMIENTO DE LÍNEAS, CÓDIGOS Y PRECIOS (SIN IVA):**
+   - Crea una fila en el CSV por cada línea de producto/servicio facturado. Ignora líneas meramente informativas ("Son pesos...", despachos de importación, textos legales) salvo que aporten el número de OC.
+   - En `product_code`, extrae todos los códigos de artículo del proveedor visibles en esa línea (si hay más de uno, únelos con ` / `).
    - En Facturas "A" o "M", extrae precios unitarios y subtotales de línea **NETOS (sin IVA)**. Si el proveedor no detalla alícuota de IVA por línea, NO la inventes.
 
 6. **DESCUENTOS E IMPUESTOS DE PIE DE FACTURA:**
    - `discount_percentage`: Descuento porcentual de esa fila. Si hay cascada (ej: 10% + 5%), calcula el equivalente único (`14.5`).
-   - `global_discount_amount`: Descuento global en el pie antes de impuestos como positivo (`0.0` si no hay).
    - Separa claramente el IVA total (`total_vat`) de percepciones y otros tributos (`other_taxes_perceptions`).
    - En `perceptions_detail`, usa SIEMPRE el separador ` | ` (barra vertical) entre cada percepción.
 
@@ -42,47 +41,16 @@ Eres un especialista en extracción de datos contables argentinos (normativa AFI
    - **Estructura Plana:** Repite los datos de cabecera y totales de pie en todas las filas del mismo comprobante.
    - **Números (Float):** Punto (`.`) como separador decimal, sin separador de miles ni símbolos de moneda (`1234.56`). Nulos numéricos: `0.0`.
    - **Fechas:** Formato ISO estricto `YYYY-MM-DD`.
-   - **Comprobante Odoo AR (`invoice_number`):** Formatea SIEMPRE con ceros a la izquierda: **5 dígitos** punto de venta + guion + **8 dígitos** número (ej: si dice `0033-00048461`, escribe `00033-00048461`).
+   - **Comprobante Odoo AR (`invoice_number`):** Formatea SIEMPRE con ceros a la izquierda: **5 dígitos** punto de venta + guion + **8 dígitos** número (ej: si dice `0004-141869`, escribe `00004-00141869`).
    - **Texto y CSV:** Delimitador coma (`,`). Encierra SIEMPRE entre comillas dobles (`"..."`) `vendor_name`, `payment_terms`, `product_code`, `description` y `perceptions_detail`. Reemplaza comillas dobles internas por simples (`'`).
    - **Salida Pura:** Devuelve ÚNICAMENTE el texto plano del CSV, sin bloques ```csv ni explicaciones.
 
 # ESTRUCTURA CSV REQUERIDA (CABECERAS EXACTAS EN FILA 1)
 vendor_name,vendor_cuit,document_type,invoice_letter,invoice_number,invoice_date,due_date,payment_terms,cae_number,currency,exchange_rate,purchase_order_number,product_code,description,quantity,unit_price,discount_percentage,line_net_total,gross_subtotal,global_discount_amount,net_taxable_base,exempt_amount,total_vat,other_taxes_perceptions,perceptions_detail,total_amount
-
-# DICCIONARIO DE DATOS
-- `vendor_name`: Razón social del proveedor emisor (entre comillas dobles).
-- `vendor_cuit`: CUIT del emisor con guiones (`XX-XXXXXXXX-X`).
-- `document_type`: `FACTURA`, `NOTA_CREDITO` o `NOTA_DEBITO`.
-- `invoice_letter`: `A`, `B`, `C`, `M` o `E`.
-- `invoice_number`: 5 dígitos PV + `-` + 8 dígitos número (`00033-00048461`).
-- `invoice_date`: Fecha de emisión (`YYYY-MM-DD`).
-- `due_date`: Fecha de vencimiento comercial de PAGO (`YYYY-MM-DD`). Vacío si no figura ni puede calcularse por plazo único en días. ¡Nunca poner el Vto. de CAE!
-- `payment_terms`: Texto de condición de pago o condicion de venta (ej: `"30 días fecha factura"`, `"Cuenta Corriente"`). Entre comillas dobles; `""` si no figura.
-- `cae_number`: CAE / CAEA de 14 dígitos numéricos.
-- `currency`: `ARS`, `USD` o `EUR`.
-- `exchange_rate`: Tipo de cambio impreso (Float, `1.0` si es `ARS`).
-- `purchase_order_number`: Número(s) de OC limpios separados por ` / `. Vacío si no figura.
-- `product_code`: Código(s) del artículo según proveedor (si hay más de uno en la línea, unirlos con ` / `, entre comillas dobles).
-- `description`: Descripción exacta del ítem en una línea (entre comillas dobles).
-- `quantity`: Cantidad facturada (Float).
-- `unit_price`: Precio unitario neto sin IVA antes de descuento (Float).
-- `discount_percentage`: % descuento de línea de 0 a 100 (Float, `0.0` si no hay).
-- `line_net_total`: Subtotal neto de línea (Float).
-- `gross_subtotal`: Suma bruta de líneas antes de descuentos globales (Float).
-- `global_discount_amount`: Descuento general en pie antes de impuestos (Float, `0.0` si no aplica).
-- `net_taxable_base`: Neto Gravado total del comprobante (Float).
-- `exempt_amount`: No Gravado / Exento total (Float, `0.0` si no aplica).
-- `total_vat`: Suma exclusiva de IVA del pie (Float).
-- `other_taxes_perceptions`: Suma total de Percepciones e Impuestos Internos, sin IVA (Float).
-- `perceptions_detail`: Desglose SOLO de percepciones separado por ` | ` (ej: `"Percep. RG 2408/08: 201.03 | Percep. IIBB Entre Rios: 6.70"`).
-- `total_amount`: Total final a pagar de la factura (Float).
 """
 
+
 def _sanitize_and_compute_due_date(invoice_date_str: str, due_date_str: str, payment_terms: str) -> str:
-    """
-    1. Detecta y anula automáticamente el Vencimiento del CAE (típicamente +10 u +11 días desde emisión).
-    2. Calcula el vencimiento real si payment_terms indica días (ej. '30 días Fecha Factura').
-    """
     inv_dt = None
     if invoice_date_str:
         try:
@@ -90,32 +58,28 @@ def _sanitize_and_compute_due_date(invoice_date_str: str, due_date_str: str, pay
         except ValueError:
             pass
 
-    # Extraer cantidad de días de payment_terms si existe (ej: '30 días Fecha Factura' -> 30)
     term_days = None
     if payment_terms and not re.search(r"\d+\s*[/,-]\s*\d+", payment_terms):
         m = re.search(r"\b(\d{1,3})\s*d[ií]as?\b", payment_terms.lower())
         if m:
             term_days = int(m.group(1))
 
-    # Verificar si Gemini coló la fecha de Vto. del CAE en due_date
     if due_date_str and inv_dt:
         try:
             due_dt = datetime.strptime(due_date_str, "%Y-%m-%d")
             delta_days = (due_dt - inv_dt).days
-            # En AFIP/ARCA el CAE vence a los 10 días (a veces 9-11).
-            # Si payment_terms pide otro plazo (ej. 30 días) o está vacío y delta es 9..11 días, es Vto. CAE:
             if (term_days and abs(delta_days - term_days) > 3 and 8 <= delta_days <= 12) or (
-                not term_days and 9 <= delta_days <= 11 and "contado" not in (payment_terms or "").lower()
+                not term_days and 8 <= delta_days <= 12 and "contado" not in (payment_terms or "").lower()
             ):
-                due_date_str = ""  # Descartar fecha falsa del CAE
+                due_date_str = ""
         except ValueError:
             due_date_str = ""
 
-    # Si no quedó fecha explícita válida pero tenemos plazo en días en payment_terms, calcularla exacto
     if not due_date_str and inv_dt and term_days is not None:
         return (inv_dt + timedelta(days=term_days)).strftime("%Y-%m-%d")
 
     return due_date_str or ""
+
 
 def _safe_float(val, default=0.0) -> float:
     if val is None:
@@ -144,7 +108,6 @@ def _clean_csv_text(raw_text: str) -> str:
 
 
 def _normalize_ar_doc_number(raw_num: str) -> str:
-    """Garantiza formato estricto 5 dígitos PV + guion + 8 dígitos número (ej: 00033-00048461)."""
     s = (raw_num or "").strip()
     if not s:
         return ""
@@ -163,15 +126,12 @@ def _normalize_ar_doc_number(raw_num: str) -> str:
 
 
 def _parse_perceptions_detail(detail_str: str) -> list:
-    """Soporta tanto '|' como ';' como separador entre múltiples percepciones."""
     if not detail_str or not detail_str.strip():
         return []
     out = []
-    # Cortar tanto por '|' como por ';'
     for part in [p.strip() for p in re.split(r"\s*[|;]\s*", detail_str) if p.strip()]:
         if ":" in part:
             label, amt_str = part.rsplit(":", 1)
-            # Limpiar posible moneda pegada al número (ej: 'USD 67.01')
             amt_clean = re.sub(r"[^\d.,-]", "", amt_str)
             out.append({"label": label.strip(), "amount": round(_safe_float(amt_clean, 0.0), 2)})
         else:
@@ -184,15 +144,15 @@ def extract_invoice_with_gemini(file_bytes: bytes, mime_type: str) -> dict:
     if not api_key:
         raise RuntimeError("Falta configurar GEMINI_API_KEY en las variables de entorno.")
 
-    primary_model = os.getenv("GEMINI_MODEL", "gemini-3.8-flash").strip()
+    primary_model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip()
     thinking_lvl = os.getenv("GEMINI_THINKING_LEVEL", "LOW").strip().upper()
 
-    # Cadena de respaldo automática ante picos de demanda (503) o rate limit (429)
     fallback_candidates = [
         primary_model,
         "gemini-3.8-flash",
         "gemini-3.5-flash-lite",
         "gemini-2.5-flash",
+        "gemini-2.0-flash",
     ]
     models_to_try = list(dict.fromkeys(m for m in fallback_candidates if m))
 
@@ -214,7 +174,6 @@ def extract_invoice_with_gemini(file_bytes: bytes, mime_type: str) -> dict:
     last_error = None
 
     for model_name in models_to_try:
-        # Construir configuración compatible según el modelo de la cadena
         cfg_kwargs = {"system_instruction": SYSTEM_PROMPT, "temperature": 0.0}
         try:
             if "3.8" in model_name or "3.5" in model_name:
@@ -227,7 +186,6 @@ def extract_invoice_with_gemini(file_bytes: bytes, mime_type: str) -> dict:
             cfg_kwargs.pop("media_resolution", None)
             config = types.GenerateContentConfig(**cfg_kwargs)
 
-        # Hasta 2 intentos por modelo antes de saltar al siguiente modelo de respaldo
         for attempt in range(2):
             try:
                 response = client.models.generate_content(
@@ -245,10 +203,8 @@ def extract_invoice_with_gemini(file_bytes: bytes, mime_type: str) -> dict:
                     for code in ("503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED", "OVERLOADED", "500")
                 )
                 if is_transient:
-                    # Espera corta (1.5s en intento 1, luego pasa al siguiente modelo)
                     time.sleep(1.5 * (attempt + 1))
                     continue
-                # Si el nombre del modelo no existe en tu tier/región (404), probar el siguiente
                 if "404" in err_str or "NOT_FOUND" in err_str or "INVALID_ARGUMENT" in err_str:
                     break
                 raise
@@ -258,7 +214,7 @@ def extract_invoice_with_gemini(file_bytes: bytes, mime_type: str) -> dict:
 
     if response is None:
         raise RuntimeError(
-            f"Los modelos de Gemini están temporalmente saturados tras varios intentos. Último detalle: {last_error}"
+            f"No se obtuvo respuesta de los modelos Gemini. Último error: {type(last_error).__name__}: {last_error}"
         )
 
     raw_csv = _clean_csv_text(response.text or "")
@@ -275,10 +231,13 @@ def extract_invoice_with_gemini(file_bytes: bytes, mime_type: str) -> dict:
         raw_po = (r.get("purchase_order_number") or "").strip()
         if raw_po:
             for tok in re.split(r"[/,;]+", raw_po):
-                # Quitar porcentajes pegados como "94076 5%"
                 clean_tok = re.sub(r"\s+\d+(?:[.,]\d+)?\s*%.*$", "", tok.strip()).strip()
                 if clean_tok and clean_tok not in po_candidates:
                     po_candidates.append(clean_tok)
+
+    inv_date_clean = (first.get("invoice_date") or "").strip()
+    raw_due_clean = (first.get("due_date") or "").strip()
+    pay_terms_clean = (first.get("payment_terms") or "").strip()
 
     header = {
         "vendor_name": (first.get("vendor_name") or "").strip(),
@@ -286,8 +245,9 @@ def extract_invoice_with_gemini(file_bytes: bytes, mime_type: str) -> dict:
         "document_type": (first.get("document_type") or "FACTURA").strip().upper(),
         "invoice_letter": (first.get("invoice_letter") or "A").strip().upper(),
         "invoice_number": _normalize_ar_doc_number(first.get("invoice_number") or ""),
-        "invoice_date": (first.get("invoice_date") or "").strip(),
-        "due_date": (first.get("due_date") or "").strip(),
+        "invoice_date": inv_date_clean,
+        "payment_terms": pay_terms_clean,
+        "due_date": _sanitize_and_compute_due_date(inv_date_clean, raw_due_clean, pay_terms_clean),
         "cae_number": re.sub(r"\D", "", first.get("cae_number") or ""),
         "currency": (first.get("currency") or "ARS").strip().upper(),
         "exchange_rate": _safe_float(first.get("exchange_rate"), 1.0),
@@ -302,22 +262,9 @@ def extract_invoice_with_gemini(file_bytes: bytes, mime_type: str) -> dict:
         "perceptions_detail": (first.get("perceptions_detail") or "").strip(),
         "parsed_perceptions": _parse_perceptions_detail(first.get("perceptions_detail") or ""),
         "total_amount": _safe_float(first.get("total_amount"), 0.0),
-        "payment_terms": (first.get("payment_terms") or "").strip(),
-        "due_date": _sanitize_and_compute_due_date(
-          (first.get("invoice_date") or "").strip(),    
-          (first.get("due_date") or "").strip(),
-          (first.get("payment_terms") or "").strip(),
-        ),
     }
 
     lines = []
-    global_disc = header["global_discount_amount"]
-    sum_lines_gross = sum(l["line_net_total"] for l in lines)
-    if global_disc > 0 and sum_lines_gross > global_disc and all(l["discount_percentage"] == 0.0 for l in lines):
-        exact_disc_pct = round((global_disc / sum_lines_gross) * 100.0, 4)
-        for l in lines:
-            l["discount_percentage"] = exact_disc_pct
-            l["line_net_total"] = round(l["quantity"] * l["unit_price"] * (1.0 - exact_disc_pct / 100.0), 2)
     for idx, r in enumerate(rows):
         qty = _safe_float(r.get("quantity"), 1.0)
         price = _safe_float(r.get("unit_price"), 0.0)
@@ -336,6 +283,15 @@ def extract_invoice_with_gemini(file_bytes: bytes, mime_type: str) -> dict:
             "line_net_total": net,
         })
 
+    # AHORA SÍ (después de poblar lines): prorratear descuento global de pie si las líneas vinieron con 0%
+    global_disc = header["global_discount_amount"]
+    sum_lines_gross = sum(l["line_net_total"] for l in lines)
+    if global_disc > 0 and sum_lines_gross > global_disc and all(l["discount_percentage"] == 0.0 for l in lines):
+        exact_disc_pct = round((global_disc / sum_lines_gross) * 100.0, 4)
+        for l in lines:
+            l["discount_percentage"] = exact_disc_pct
+            l["line_net_total"] = round(l["quantity"] * l["unit_price"] * (1.0 - exact_disc_pct / 100.0), 2)
+
     usage = {}
     if getattr(response, "usage_metadata", None):
         um = response.usage_metadata
@@ -344,104 +300,6 @@ def extract_invoice_with_gemini(file_bytes: bytes, mime_type: str) -> dict:
             "output_tokens": getattr(um, "candidates_token_count", 0) or 0,
             "total_tokens": getattr(um, "total_token_count", 0) or 0,
             "model": used_model,
-        }
-
-    return {"header": header, "lines": lines, "raw_csv": raw_csv, "usage": usage}
-    api_key = os.getenv("GEMINI_API_KEY", "").strip()
-    if not api_key:
-        raise RuntimeError("Falta configurar GEMINI_API_KEY en las variables de entorno.")
-
-    model_name = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite").strip()
-    thinking_lvl = os.getenv("GEMINI_THINKING_LEVEL", "MINIMAL").strip().upper()
-
-    client = genai.Client(api_key=api_key)
-    contents = [
-        types.Content(
-            role="user",
-            parts=[
-                types.Part(inline_data=types.Blob(mime_type=mime_type, data=file_bytes)),
-                types.Part.from_text(text="Extrae los datos del comprobante en CSV plano según las reglas."),
-            ],
-        )
-    ]
-
-    cfg_kwargs = {"system_instruction": SYSTEM_PROMPT, "temperature": 0.0}
-    try:
-        cfg_kwargs["thinking_config"] = types.ThinkingConfig(thinking_level=thinking_lvl)
-        cfg_kwargs["media_resolution"] = "MEDIA_RESOLUTION_MEDIUM"
-        config = types.GenerateContentConfig(**cfg_kwargs)
-    except Exception:
-        cfg_kwargs.pop("thinking_config", None)
-        cfg_kwargs.pop("media_resolution", None)
-        config = types.GenerateContentConfig(**cfg_kwargs)
-
-    response = client.models.generate_content(model=model_name, contents=contents, config=config)
-    raw_csv = _clean_csv_text(response.text or "")
-    if not raw_csv:
-        raise ValueError("Gemini devolvió una respuesta vacía.")
-
-    rows = list(csv.DictReader(io.StringIO(raw_csv)))
-    if not rows:
-        raise ValueError(f"No se pudo parsear el CSV devuelto: {raw_csv[:300]}")
-
-    first = rows[0]
-    po_candidates = []
-    for r in rows:
-        raw_po = (r.get("purchase_order_number") or "").strip()
-        if raw_po:
-            for tok in re.split(r"[/,;]+", raw_po):
-                clean_tok = tok.strip()
-                if clean_tok and clean_tok not in po_candidates:
-                    po_candidates.append(clean_tok)
-
-    header = {
-        "vendor_name": (first.get("vendor_name") or "").strip(),
-        "vendor_cuit": (first.get("vendor_cuit") or "").strip(),
-        "document_type": (first.get("document_type") or "FACTURA").strip().upper(),
-        "invoice_letter": (first.get("invoice_letter") or "A").strip().upper(),
-        "invoice_number": (first.get("invoice_number") or "").strip(),
-        "invoice_date": (first.get("invoice_date") or "").strip(),
-        "due_date": (first.get("due_date") or "").strip(),
-        "cae_number": re.sub(r"\D", "", first.get("cae_number") or ""),
-        "currency": (first.get("currency") or "ARS").strip().upper(),
-        "exchange_rate": _safe_float(first.get("exchange_rate"), 1.0),
-        "purchase_order_number": " / ".join(po_candidates),
-        "po_references": po_candidates,
-        "gross_subtotal": _safe_float(first.get("gross_subtotal"), 0.0),
-        "global_discount_amount": _safe_float(first.get("global_discount_amount"), 0.0),
-        "net_taxable_base": _safe_float(first.get("net_taxable_base"), 0.0),
-        "exempt_amount": _safe_float(first.get("exempt_amount"), 0.0),
-        "total_vat": _safe_float(first.get("total_vat"), 0.0),
-        "other_taxes_perceptions": _safe_float(first.get("other_taxes_perceptions"), 0.0),
-        "perceptions_detail": (first.get("perceptions_detail") or "").strip(),
-        "parsed_perceptions": _parse_perceptions_detail(first.get("perceptions_detail") or ""),
-        "total_amount": _safe_float(first.get("total_amount"), 0.0),
-    }
-
-    lines = []
-    for idx, r in enumerate(rows):
-        qty = _safe_float(r.get("quantity"), 1.0)
-        price = _safe_float(r.get("unit_price"), 0.0)
-        disc = _safe_float(r.get("discount_percentage"), 0.0)
-        net = _safe_float(r.get("line_net_total"), round(qty * price * (1.0 - disc / 100.0), 2))
-        lines.append({
-            "index": idx,
-            "product_code": (r.get("product_code") or "").strip(),
-            "description": (r.get("description") or "").strip(),
-            "quantity": qty,
-            "unit_price": price,
-            "discount_percentage": disc,
-            "line_net_total": net,
-        })
-
-    usage = {}
-    if getattr(response, "usage_metadata", None):
-        um = response.usage_metadata
-        usage = {
-            "prompt_tokens": getattr(um, "prompt_token_count", 0) or 0,
-            "output_tokens": getattr(um, "candidates_token_count", 0) or 0,
-            "total_tokens": getattr(um, "total_token_count", 0) or 0,
-            "model": model_name,
         }
 
     return {"header": header, "lines": lines, "raw_csv": raw_csv, "usage": usage}

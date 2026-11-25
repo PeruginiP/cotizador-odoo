@@ -1122,30 +1122,30 @@ def _read_purchase_orders_with_lines(models, db, uid, password, po_records: list
         po_lines = []
         po_partner_id = int(po["partner_id"][0]) if isinstance(po.get("partner_id"), list) else 0
         for lid in (po.get("order_line") or []):
-            v_codes = list(dict.fromkeys(
-                supplier_codes_by_prod.get((pid, po_partner_id), []) +
-                supplier_codes_by_prod.get((pid, 0), [])
-            ))
             rl = lines_by_id.get(int(lid))
             if not rl or rl.get("display_type"):
                 continue
             pid = int(rl["product_id"][0]) if isinstance(rl.get("product_id"), list) else None
             p_info = prod_map.get(pid, {})
+            v_codes = list(dict.fromkeys(
+                supplier_codes_by_prod.get((pid, po_partner_id), []) +
+                supplier_codes_by_prod.get((pid, 0), [])
+            )) if pid else []
+
             t_list = [int(t) for t in (rl.get("taxes_id") or [])]
             t_names = [tax_map[t]["name"] for t in t_list if t in tax_map]
 
             qty_ordered = float(rl.get("product_qty") or 0.0)
             qty_invoiced = float(rl.get("qty_invoiced") or 0.0)
             qty_pending = round(max(qty_ordered - qty_invoiced, 0.0), 4)
-        
+
             po_lines.append({
-                
                 "po_line_id": int(rl["id"]),
                 "po_id": int(po["id"]),
                 "po_name": po["name"],
                 "product_id": pid,
                 "default_code": p_info.get("default_code") or "",
-                "vendor_codes": v_codes,  # <-- Códigos en product.supplierinfo.product_code
+                "vendor_codes": v_codes,
                 "product_name": p_info.get("name") or (rl["product_id"][1] if isinstance(rl.get("product_id"), list) else ""),
                 "description": rl.get("name") or "",
                 "product_qty": qty_ordered,
@@ -1622,53 +1622,47 @@ def auto_match_invoice_lines_to_pos(
     return matched_out
 
 def _resolve_ar_latam_document_type(models, db, uid, password, doc_type_str: str, letter: str, ctx: dict):
-    """Resuelve con exactitud el código AFIP/ARCA en l10n_latam.document.type (ej. código '1' = Factura A)."""
     afip_code_map = {
-        ("FACTURA", "A"): "1",
-        ("NOTA_DEBITO", "A"): "2",
-        ("NOTA_CREDITO", "A"): "3",
-        ("FACTURA", "B"): "6",
-        ("NOTA_DEBITO", "B"): "7",
-        ("NOTA_CREDITO", "B"): "8",
-        ("FACTURA", "C"): "11",
-        ("NOTA_DEBITO", "C"): "12",
-        ("NOTA_CREDITO", "C"): "13",
-        ("FACTURA", "M"): "51",
-        ("NOTA_DEBITO", "M"): "52",
-        ("NOTA_CREDITO", "M"): "53",
+        ("FACTURA", "A"): ("1", "FA-A"),
+        ("NOTA_DEBITO", "A"): ("2", "ND-A"),
+        ("NOTA_CREDITO", "A"): ("3", "NC-A"),
+        ("FACTURA", "B"): ("6", "FA-B"),
+        ("NOTA_DEBITO", "B"): ("7", "ND-B"),
+        ("NOTA_CREDITO", "B"): ("8", "NC-B"),
+        ("FACTURA", "C"): ("11", "FA-C"),
+        ("NOTA_DEBITO", "C"): ("12", "ND-C"),
+        ("NOTA_CREDITO", "C"): ("13", "NC-C"),
+        ("FACTURA", "M"): ("51", "FA-M"),
+        ("NOTA_DEBITO", "M"): ("52", "ND-M"),
+        ("NOTA_CREDITO", "M"): ("53", "NC-M"),
+        ("FACTURA", "E"): ("19", "FA-E"),
     }
     norm_doc = "NOTA_CREDITO" if "CRED" in doc_type_str else ("NOTA_DEBITO" if "DEB" in doc_type_str else "FACTURA")
-    afip_code = afip_code_map.get((norm_doc, letter))
+    afip_code, expected_prefix = afip_code_map.get((norm_doc, letter), (None, f"FA-{letter}"))
 
     try:
+        ar_countries = models.execute_kw(db, uid, password, "res.country", "search", [[("code", "=", "AR")]], {"limit": 1})
+        country_domain = [("country_id", "=", ar_countries[0])] if ar_countries else []
+
         if afip_code:
-            # Buscar por código AFIP exacto ('1' o '001') de Argentina
             recs = models.execute_kw(
                 db, uid, password, "l10n_latam.document.type", "search_read",
-                [[
-                    ("active", "=", True),
-                    ("code", "in", [afip_code, afip_code.zfill(2), afip_code.zfill(3)]),
-                ]],
+                [country_domain + [("active", "=", True), ("code", "in", [afip_code, afip_code.zfill(2), afip_code.zfill(3)])]],
                 {"fields": ["id", "name", "code", "doc_code_prefix"], "order": "id asc", "limit": 5, "context": ctx},
             )
             if recs:
-                return int(recs[0]["id"])
+                best = next((r for r in recs if (r.get("doc_code_prefix") or "").upper().startswith(expected_prefix)), recs[0])
+                return int(best["id"])
 
-        # Fallback por prefijo (FA-A, Facturas A)
-        internal_t = "credit_note" if norm_doc == "NOTA_CREDITO" else ("debit_note" if norm_doc == "NOTA_DEBITO" else "invoice")
         recs = models.execute_kw(
             db, uid, password, "l10n_latam.document.type", "search_read",
-            [[
-                ("active", "=", True),
-                ("internal_type", "=", internal_t),
-                ("name", "ilike", f" {letter}"),
-            ]],
-            {"fields": ["id", "name"], "limit": 3, "context": ctx},
+            [country_domain + [("active", "=", True), ("doc_code_prefix", "ilike", expected_prefix)]],
+            {"fields": ["id", "name", "doc_code_prefix"], "limit": 3, "context": ctx},
         )
         if recs:
             return int(recs[0]["id"])
-    except Exception:
-        pass
+    except Exception as exc:
+        print(f"[WARN] Error buscando l10n_latam.document.type AR: {exc}", flush=True)
     return None
 
 
@@ -1914,7 +1908,7 @@ def create_draft_vendor_bill(
         move_vals["date"] = header["invoice_date"]
     if header.get("due_date"):
         # Caso 1: La factura tiene fecha de vencimiento explícita (o calculada por días)
-        move_vals["invoice_date_due"] = header["due_date"]
+        move_vals["invoice_date_due"] =  header["due_date"]
     else:
         # Caso 2: El PDF no tiene fecha de vencimiento -> heredar Plazo de Pago de la OC o del Proveedor
         payment_term_id = None
