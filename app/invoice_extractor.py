@@ -49,6 +49,43 @@ Eres un especialista en extracción de datos contables argentinos (normativa AFI
 vendor_name,vendor_cuit,document_type,invoice_letter,invoice_number,invoice_date,due_date,payment_terms,cae_number,currency,exchange_rate,purchase_order_number,product_code,description,quantity,unit_price,discount_percentage,line_net_total,gross_subtotal,global_discount_amount,net_taxable_base,exempt_amount,total_vat,other_taxes_perceptions,perceptions_detail,total_amount
 """
 
+EXPECTED_CSV_HEADERS = [
+    "vendor_name", "vendor_cuit", "document_type", "invoice_letter", "invoice_number",
+    "invoice_date", "due_date", "payment_terms", "cae_number", "currency",
+    "exchange_rate", "purchase_order_number", "product_code", "description",
+    "quantity", "unit_price", "discount_percentage", "line_net_total",
+    "gross_subtotal", "global_discount_amount", "net_taxable_base", "exempt_amount",
+    "total_vat", "other_taxes_perceptions", "perceptions_detail", "total_amount",
+]
+
+def _parse_csv_rows_safely(raw_csv: str) -> list:
+    """
+    Parsea el CSV devuelto por Gemini tanto si incluyó la fila de cabeceras
+    como si arrancó directamente con la primera fila de datos.
+    """
+    parsed_matrix = [
+        row for row in csv.reader(io.StringIO(raw_csv))
+        if any(cell.strip() for cell in row)
+    ]
+    if not parsed_matrix:
+        return []
+
+    first_row_lower = [c.strip().lower() for c in parsed_matrix[0]]
+    if "vendor_name" in first_row_lower or "vendor_cuit" in first_row_lower:
+        headers = first_row_lower
+        data_rows = parsed_matrix[1:]
+    else:
+        # Gemini omitió la cabecera y mandó directo las 26 columnas de datos
+        headers = EXPECTED_CSV_HEADERS
+        data_rows = parsed_matrix
+
+    out = []
+    for r in data_rows:
+        item = {}
+        for idx, col_name in enumerate(headers):
+            item[col_name] = r[idx].strip() if idx < len(r) else ""
+        out.append(item)
+    return out
 
 def _sanitize_and_compute_due_date(invoice_date_str: str, due_date_str: str, payment_terms: str) -> str:
     inv_dt = None
@@ -221,7 +258,7 @@ def extract_invoice_with_gemini(file_bytes: bytes, mime_type: str) -> dict:
     if not raw_csv:
         raise ValueError("Gemini devolvió una respuesta vacía.")
 
-    rows = list(csv.DictReader(io.StringIO(raw_csv)))
+    rows = _parse_csv_rows_safely(raw_csv)
     if not rows:
         raise ValueError(f"No se pudo parsear el CSV devuelto: {raw_csv[:300]}")
 
