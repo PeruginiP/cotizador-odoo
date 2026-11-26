@@ -2405,7 +2405,7 @@ def create_draft_vendor_bill(
         for p in (perceptions or [])
     )
     body_html = (
-        f"<p>Factura en borrador generada vía <b>Portal IA Gemini</b> por <b>{creator_name}</b>.</p>"
+        f"<p>Factura en borrador generada vía asistente por <b>{creator_name}</b>.</p>"
         f"<ul>"
         f"<li>Comprobante: <b>{doc_type_str} {letter} {inv_num}</b> (CAE: {cae or 'N/D'})</li>"
         f"<li>OC vinculadas: <b>{move_vals.get('invoice_origin') or 'Sin OC'}</b></li>"
@@ -2456,5 +2456,5 @@ def create_draft_vendor_bill(
         "amount_untaxed": float(created.get("amount_untaxed") or 0.0),
         "amount_tax": float(created.get("amount_tax") or 0.0),
         "amount_total": float(created.get("amount_total") or 0.0),
-        "odoo_link": f"{url}/odoo/account.move/{move_id}",
+        "odoo_link": f"{url}/odoo/vendor-bills/{move_id}",
     }
