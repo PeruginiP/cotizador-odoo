@@ -2456,5 +2456,5 @@ def create_draft_vendor_bill(
         "amount_untaxed": float(created.get("amount_untaxed") or 0.0),
         "amount_tax": float(created.get("amount_tax") or 0.0),
         "amount_total": float(created.get("amount_total") or 0.0),
-        "odoo_link": f"{url}/web#id={move_id}&model=account.move&view_type=form",
+        "odoo_link": f"{url}/odoo/account.move/{move_id}",
     }
