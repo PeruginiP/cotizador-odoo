@@ -786,14 +786,15 @@
                 if (poNetRef !== null && poNetRef > 0) {
                     const invEffNet = ln.unit_price * (1 - (ln.discount_percentage || 0) / 100);
                     const invComparableNet = useCrossRate ? (invEffNet / compRate) : invEffNet;
-                    const diffUnit = invComparableNet - poNetRef;
-                    const diffPct = (diffUnit / poNetRef) * 100;
+                    const diffPct = ((invComparableNet - poNetRef) / poNetRef) * 100;
 
-                    // Si el neto facturado supera al neto de la OC -> ROJO, si es menor o igual -> VERDE
-                    priceClass = (diffUnit > 0.0001) ? 'diff-err' : 'diff-ok';
+                    // Mayor a +1% -> ROJO fuerte con ⚠ | Menor o igual a +1% -> VERDE intenso con ✓
+                    const isOverThreshold = diffPct > 1.0;
+                    priceClass = isOverThreshold ? 'diff-err' : 'diff-ok';
 
                     const sign = diffPct > 0 ? '+' : '';
-                    priceCompareHint = `<div style="font-size:0.72rem;">${sign}${diffPct.toFixed(1).replace('.', ',')}% vs OC</div>`;
+                    const icon = isOverThreshold ? '⚠ ' : '✓ ';
+                    priceCompareHint = `<div style="font-size:0.74rem; margin-top:2px;">${icon}${sign}${diffPct.toFixed(1).replace('.', ',')}% vs OC</div>`;
                 }
 
                 const poOptions = `<option value="">-- Sin vincular a línea de OC --</option>` + allPOLines.map(pl => `
