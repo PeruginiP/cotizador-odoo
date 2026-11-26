@@ -71,7 +71,6 @@
             background-color: #00ff00 !important;
             /* Verde esmeralda/azulado intenso */
             color: #ffffff !important;
-            border-left: 5px solid #004d40 !important;
             font-weight: 700;
         }
 
@@ -788,13 +787,26 @@
                     const invComparableNet = useCrossRate ? (invEffNet / compRate) : invEffNet;
                     const diffPct = ((invComparableNet - poNetRef) / poNetRef) * 100;
 
-                    // Mayor a +1% -> ROJO fuerte con ⚠ | Menor o igual a +1% -> VERDE intenso con ✓
-                    const isOverThreshold = diffPct > 1.0;
-                    priceClass = isOverThreshold ? 'diff-err' : 'diff-ok';
+                    let icon = '';
+                    let hintColorClass = 'text-muted';
+
+                    if (diffPct > 1.0) {
+                        // Más de +1% más caro -> ROJO intenso
+                        priceClass = 'diff-err';
+                        icon = '⚠ ';
+                        hintColorClass = '';
+                    } else if (diffPct < -1.0) {
+                        // Más de 1% más barato -> VERDE intenso
+                        priceClass = 'diff-ok';
+                        icon = '✓ ';
+                        hintColorClass = '';
+                    } else {
+                        // Entre -1% y +1% -> Sin color (blanco neutro)
+                        priceClass = '';
+                    }
 
                     const sign = diffPct > 0 ? '+' : '';
-                    const icon = isOverThreshold ? '⚠ ' : '✓ ';
-                    priceCompareHint = `<div style="font-size:0.74rem; margin-top:2px;">${icon}${sign}${diffPct.toFixed(1).replace('.', ',')}% vs OC</div>`;
+                    priceCompareHint = `<div class="${hintColorClass}" style="font-size:0.74rem; margin-top:2px;">${icon}${sign}${diffPct.toFixed(1).replace('.', ',')}% vs OC</div>`;
                 }
 
                 const poOptions = `<option value="">-- Sin vincular a línea de OC --</option>` + allPOLines.map(pl => `

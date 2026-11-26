@@ -65,6 +65,7 @@ def _make_company_context(active_company_id: int, allowed_company_ids: list) -> 
         "allowed_company_ids": ordered,
         "company_id": cid,
         "force_company": cid,
+        "lang": "es_AR",
     }
 
 def _format_partner_address(p: dict) -> dict:
