@@ -756,6 +756,12 @@
 
             const hasAnyPack = state.lines.some(l => parseFloat(l.pack_size || 1) > 1);
             const packWrap = document.getElementById('global-pack-wrap');
+
+            const poRemMap = {};
+            allPOLines.forEach(pl => {
+                poRemMap[pl.po_line_id] = parseFloat(pl.qty_pending || 0);
+            });
+
             if (packWrap) {
                 packWrap.classList.toggle('d-none', !hasAnyPack);
                 if (hasAnyPack) {
@@ -767,12 +773,15 @@
                 const sub = +(ln.quantity * ln.unit_price * (1 - (ln.discount_percentage || 0) / 100)).toFixed(2);
                 ln.line_net_total = sub;
 
-                // REGLA CANTIDAD: Neutro (blanco) si alcanza el pendiente; ROJO únicamente si supera el pendiente de facturar de la OC
+                // Descontar saldo acumulado de la línea de OC en orden de aparición
                 let qtyClass = '';
-                if (ln.po_qty_pending !== null && ln.po_qty_pending !== undefined) {
-                    if (ln.quantity > ln.po_qty_pending + 0.0001) {
-                        qtyClass = 'diff-err';
+                let remForThisRow = ln.po_qty_pending;
+                if (ln.matched_po_line_id && poRemMap[ln.matched_po_line_id] !== undefined) {
+                    remForThisRow = +poRemMap[ln.matched_po_line_id].toFixed(4);
+                    if (ln.quantity > remForThisRow + 0.0001) {
+                        qtyClass = 'diff-err'; // Solo se pinta en ROJO si entre los renglones acumulados superan el pendiente de la OC
                     }
+                    poRemMap[ln.matched_po_line_id] = Math.max(0, +(remForThisRow - ln.quantity).toFixed(4));
                 }
 
                 // REGLA PRECIO NETO UNITARIO: VERDE si es menor (o igual) al neto de la OC; ROJO si es mayor al neto de la OC
@@ -834,7 +843,7 @@
                         <td class="text-end ${qtyClass}">
                             <input type="number" step="0.01" class="form-control form-control-sm text-end fw-semibold" value="${ln.quantity}"
                                 onchange="state.lines[${idx}].quantity=parseFloat(this.value||0); renderLinesTable(); updateTotalsSummary();">
-                            ${ln.po_qty_pending !== null ? `<div style="font-size:0.71rem;">OC pend: ${ln.po_qty_pending}</div>` : ''}
+                            ${ln.po_qty_pending !== null ? `<div style="font-size:0.71rem;">OC pend: ${remForThisRow}</div>` : ''}
                         </td>
                         <td class="text-end ${priceClass}">
                             <input type="number" step="0.01" class="form-control form-control-sm text-end fw-semibold" value="${ln.unit_price}"

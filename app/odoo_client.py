@@ -1647,6 +1647,14 @@ def auto_match_invoice_lines_to_pos(
     header: dict = None,
     vat_taxes: list = None,
 ) -> list:
+    """
+    Conciliación Muchos-a-Muchos con control de saldo dinámico por línea de OC:
+    - Permite que varios renglones repetidos de la factura consuman saldo de una misma línea de OC.
+    - Cuando una línea de OC agota su saldo pendiente, salta automáticamente a la siguiente línea del mismo producto en la OC.
+    - Si un renglón de factura supera una línea de OC pero existen más líneas con saldo del mismo producto en la OC,
+      divide el renglón automáticamente para calzar con cada línea de la OC.
+    - Bloquea cruces falsos contra otros códigos distintos y valida proporcionalidad de precios antes de inferir packs.
+    """
     pool = []
     for po in purchase_orders:
         for pl in po.get("lines", []):
@@ -1664,6 +1672,7 @@ def auto_match_invoice_lines_to_pos(
                 "product_id": None,
                 "odoo_product_label": "",
                 "po_qty_pending": None,
+                "po_qty_allocated_ok": True,
                 "po_price_unit": None,
                 "po_discount": None,
                 "po_eff_unit_price": None,
@@ -1677,142 +1686,230 @@ def auto_match_invoice_lines_to_pos(
     comp_rate = float((header or {}).get("comparison_rate") or 1.0)
     inv_curr = ((header or {}).get("currency") or "ARS").upper()
 
-    candidate_pairs = []  # (score, inv_idx, pl_idx, should_unpack, inferred_pack)
+    # Saldo disponible en vivo para cada línea de OC mientras vamos asignando renglones
+    rem_qty = {
+        idx: (float(pl["qty_pending"]) if float(pl["qty_pending"]) > 0 else float(pl["product_qty"]))
+        for idx, pl in enumerate(pool)
+    }
+
+    # 1. Pre-filtrar candidatos válidos por identidad de producto (evita cruzar ej. '28912' con 'XVB7C21B')
+    inv_candidates = {}
     for inv_idx, inv_ln in enumerate(invoice_lines):
         inv_codes = inv_ln.get("product_codes") or [
-            c.strip() for c in re.split(r"[/|;]+", inv_ln.get("product_code") or "") if c.strip()
+            c.strip() for c in re.split(r"[|;]+", inv_ln.get("product_code") or "") if c.strip()
         ]
         inv_desc = (inv_ln.get("description") or "").strip().lower()
-        billed_qty = float(inv_ln.get("billed_qty") or inv_ln.get("quantity") or 1.0)
-        explicit_pack = float(inv_ln.get("pack_size") or 1.0)
-        # Subtotal neto fijo de la línea en moneda de la factura
-        line_sub = float(inv_ln.get("line_net_total") or (
-            float(inv_ln.get("quantity") or 1.0) * float(inv_ln.get("unit_price") or 0.0) * (1.0 - float(inv_ln.get("discount_percentage") or 0.0) / 100.0)
-        ))
-        billed_eff_unit = (line_sub / billed_qty) if billed_qty > 0 else 0.0
-        comp_billed_unit = (billed_eff_unit / comp_rate) if (inv_curr == "ARS" and comp_rate > 1.0) else billed_eff_unit
 
+        scored_pls = []
+        best_c_sim = 0.0
         for pl_idx, pl in enumerate(pool):
             pl_desc = f"{pl.get('product_name', '')} {pl.get('description', '')}".strip().lower()
-            code_sim = _score_product_codes(
+            c_sim = _score_product_codes(
                 inv_codes=inv_codes,
                 vendor_codes=pl.get("vendor_codes", []),
                 internal_code=pl.get("default_code", ""),
                 pl_desc=pl_desc,
             )
-            desc_sim = SequenceMatcher(None, inv_desc, pl_desc).ratio() if (inv_desc and pl_desc) else 0.0
+            d_sim = SequenceMatcher(None, inv_desc, pl_desc).ratio() if (inv_desc and pl_desc) else 0.0
+            best_c_sim = max(best_c_sim, c_sim)
+            scored_pls.append((pl_idx, c_sim, d_sim))
 
-            ref_qty = pl["qty_pending"] if pl["qty_pending"] > 0 else pl["product_qty"]
-            # Precio neto efectivo de la OC (considerando descuento cargado en la OC, ej. -37% o -44.79%)
+        valid_pls = []
+        for pl_idx, c_sim, d_sim in scored_pls:
+            if best_c_sim >= 0.94:
+                # Si el artículo existe con su código en la OC, prohibir matchear con otros códigos distintos
+                if c_sim >= 0.92:
+                    valid_pls.append((pl_idx, c_sim, d_sim))
+            elif inv_codes:
+                # Si trae código pero no hubo match exacto, exigir alta similitud de código o código+descripción
+                if c_sim >= 0.80 or (c_sim >= 0.65 and d_sim >= 0.72):
+                    valid_pls.append((pl_idx, c_sim, d_sim))
+            else:
+                # Facturas sin columna de código: exigir alta similitud de descripción
+                if d_sim >= 0.68:
+                    valid_pls.append((pl_idx, c_sim, d_sim))
+
+        inv_candidates[inv_idx] = (best_c_sim, valid_pls)
+
+    # Procesar primero las líneas con código inequívoco respetando el orden de aparición en la factura
+    order_inv = sorted(
+        range(len(invoice_lines)),
+        key=lambda i: (-round(inv_candidates[i][0], 2), i),
+    )
+
+    # Guardará una lista de tramos asignados por cada línea original de factura (normalmente 1, o >1 si se desdobla entre varias líneas de OC)
+    allocations_by_inv = {}
+
+    for inv_idx in order_inv:
+        inv_ln = invoice_lines[inv_idx]
+        _, valid_pls = inv_candidates[inv_idx]
+        if not valid_pls:
+            continue
+
+        # Si ya tenía un pack explícito del PDF (ej. 'Caja x 25 unid.'), viene en uom_label / pack_size original
+        uom_txt = f"{inv_ln.get('uom_label') or ''} {inv_ln.get('description') or ''}"
+        has_explicit_pack_text = bool(re.search(
+            r"\b(?:caja|paq(?:uete)?|pack|bolsa|rollo|bulto|envase)s?\s*(?:de\s*|x\s*|\*\s*)\d+",
+            uom_txt,
+            flags=re.IGNORECASE,
+        ))
+        explicit_pack = float(inv_ln.get("pack_size") or 1.0) if has_explicit_pack_text else 1.0
+
+        billed_qty = float(inv_ln.get("billed_qty") or inv_ln.get("quantity") or 1.0)
+        billed_price = float(inv_ln.get("billed_unit_price") or inv_ln.get("unit_price") or 0.0)
+        disc_pct = float(inv_ln.get("discount_percentage") or 0.0)
+        billed_eff_unit = billed_price * (1.0 - disc_pct / 100.0)
+        comp_billed_unit = (billed_eff_unit / comp_rate) if (inv_curr == "ARS" and comp_rate > 1.0) else billed_eff_unit
+
+        # Evaluar todas las líneas candidatas de la OC para este producto
+        ranked_pls = []
+        for pl_idx, c_sim, d_sim in valid_pls:
+            pl = pool[pl_idx]
+            avail = rem_qty[pl_idx]
             pl_eff_unit = float(pl["price_unit"] or 0.0) * (1.0 - float(pl.get("discount") or 0.0) / 100.0)
 
-            # Opción A: Sin multiplicar por pack (1 a 1)
-            qty_bonus_a = 0.0
-            if ref_qty > 0 and billed_qty > 0:
-                if abs(billed_qty - ref_qty) < 0.01:
-                    qty_bonus_a = 0.18
-                elif abs(billed_qty - ref_qty) / max(ref_qty, billed_qty) <= 0.15:
-                    qty_bonus_a = 0.08
-
-            price_bonus_a = 0.0
-            if pl_eff_unit > 0 and comp_billed_unit > 0:
-                if abs(comp_billed_unit - pl_eff_unit) / pl_eff_unit <= 0.04:
-                    price_bonus_a = 0.14
-
-            best_variant_bonus = qty_bonus_a + price_bonus_a
             use_unpack = False
             chosen_pack = explicit_pack
 
-            # Opción B: Multiplicando por pack explícito del PDF (ej. 'Caja x 25 unid.' -> 2 * 25 = 50)
-            pack_candidates = [explicit_pack] if explicit_pack > 1.0 else []
-            # Si el PDF no aclaró pack pero la OC pide un múltiplo típico exacto y el código coincide, probar ese múltiplo
-            if not pack_candidates and billed_qty > 0 and ref_qty > billed_qty and code_sim >= 0.68:
-                ratio = round(ref_qty / billed_qty, 4)
-                if any(abs(ratio - cp) < 0.01 for cp in COMMON_PACK_SIZES):
-                    pack_candidates.append(float(round(ratio)))
+            # Puntaje en relación al saldo restante real de esta línea de OC
+            if abs(avail - billed_qty) < 0.01:
+                qty_score = 0.30
+            elif avail >= billed_qty - 0.01:
+                qty_score = 0.22 + 0.05 * (billed_qty / max(avail, 1.0))
+            elif avail > 0:
+                qty_score = 0.06 * (avail / max(billed_qty, 1.0))
+            else:
+                qty_score = -0.25  # Línea de OC ya consumida por filas anteriores
 
-            for pk in pack_candidates:
-                unpacked_qty = billed_qty * pk
-                comp_unpacked_unit = comp_billed_unit / pk if pk > 0 else comp_billed_unit
-                qb = 0.0
-                if ref_qty > 0:
-                    if abs(unpacked_qty - ref_qty) < 0.01:
-                        qb = 0.20
-                    elif abs(unpacked_qty - ref_qty) / max(ref_qty, unpacked_qty) <= 0.20:
-                        qb = 0.10
-                pb = 0.0
-                if pl_eff_unit > 0 and comp_unpacked_unit > 0:
-                    if abs(comp_unpacked_unit - pl_eff_unit) / pl_eff_unit <= 0.05:
-                        pb = 0.16
-                # Si al desempaquetar mejora claramente la coincidencia de cantidad o precio con la OC, activamos el pack
-                if (qb + pb) > best_variant_bonus and (qb > 0 or pb > 0):
-                    best_variant_bonus = qb + pb
+            price_score = 0.0
+            if pl_eff_unit > 0 and comp_billed_unit > 0:
+                rel_diff = abs(comp_billed_unit - pl_eff_unit) / pl_eff_unit
+                if rel_diff <= 0.15:
+                    price_score = 0.14 * (1.0 - rel_diff / 0.15)
+
+            variant_score = qty_score + price_score
+
+            # Evaluar Bulto Cerrado SOLO si hay texto explícito de caja/pack O si el precio facturado es ~pk veces el de la OC
+            pack_cands = []
+            if explicit_pack > 1.0:
+                pack_cands.append((explicit_pack, True))
+            elif billed_qty > 0 and avail > billed_qty and pl_eff_unit > 0 and comp_billed_unit > pl_eff_unit * 1.65:
+                ratio_q = round(avail / billed_qty, 4)
+                if any(abs(ratio_q - cp) < 0.01 for cp in COMMON_PACK_SIZES):
+                    pk_cand = float(round(ratio_q))
+                    if abs((comp_billed_unit / pk_cand) - pl_eff_unit) / pl_eff_unit <= 0.15:
+                        pack_cands.append((pk_cand, False))
+
+            for pk, is_explicit in pack_cands:
+                unp_qty = billed_qty * pk
+                unp_unit = comp_billed_unit / pk
+                price_ok_unp = (pl_eff_unit > 0 and unp_unit > 0 and abs(unp_unit - pl_eff_unit) / pl_eff_unit <= 0.18)
+                price_ok_raw = (pl_eff_unit > 0 and comp_billed_unit > 0 and abs(comp_billed_unit - pl_eff_unit) / pl_eff_unit <= 0.15)
+                if price_ok_raw and not price_ok_unp:
+                    continue
+                q_s = 0.32 if abs(avail - unp_qty) < 0.01 else (0.24 if avail >= unp_qty - 0.01 else -0.20)
+                p_s = 0.16 if price_ok_unp else 0.0
+                if (q_s + p_s) > variant_score and (price_ok_unp or is_explicit):
+                    variant_score = q_s + p_s
                     use_unpack = True
                     chosen_pack = pk
 
-            total_score = (code_sim * 0.65) + (desc_sim * 0.25) + best_variant_bonus
-            candidate_pairs.append((total_score, inv_idx, pl_idx, use_unpack, chosen_pack))
+            total_s = (c_sim * 0.70) + (d_sim * 0.15) + variant_score
+            ranked_pls.append((total_s, pl_idx, c_sim, use_unpack, chosen_pack))
 
-    candidate_pairs.sort(key=lambda x: x[0], reverse=True)
+        ranked_pls.sort(key=lambda x: x[0], reverse=True)
+        best_s, best_pl_idx, best_c_sim, use_unpack, chosen_pack = ranked_pls[0]
+        if best_s < 0.35:
+            continue
 
-    assigned_inv = {}
-    used_pl = set()
-    for score, inv_idx, pl_idx, use_unpack, chosen_pack in candidate_pairs:
-        if score < 0.26:
-            break
-        if inv_idx not in assigned_inv and pl_idx not in used_pl:
-            assigned_inv[inv_idx] = (pool[pl_idx], score, use_unpack, chosen_pack)
-            used_pl.add(pl_idx)
+        eff_total_qty = round(billed_qty * chosen_pack, 4) if use_unpack else billed_qty
+        eff_list_price = round(billed_price / chosen_pack, 4) if (use_unpack and chosen_pack > 0) else billed_price
 
+        # Verificar si este renglón supera el saldo de best_pl_idx pero hay OTRAS líneas del MISMO producto con saldo en la OC
+        same_prod_pls_with_avail = [
+            (s, pidx) for (s, pidx, c_s, u_unp, _) in ranked_pls
+            if c_s >= 0.94 and rem_qty[pidx] > 0.0001 and u_unp == use_unpack
+        ]
+        if rem_qty[best_pl_idx] < eff_total_qty - 0.001 and len(same_prod_pls_with_avail) > 1:
+            # Desdoblar automáticamente la cantidad entre las líneas del mismo producto en la OC
+            qty_to_distribute = eff_total_qty
+            splits = []
+            for idx_sp, (s, pidx) in enumerate(same_prod_pls_with_avail):
+                if qty_to_distribute <= 0.0001:
+                    break
+                is_last = (idx_sp == len(same_prod_pls_with_avail) - 1)
+                avail_here = round(max(rem_qty[pidx], 0.0), 4)
+                take_qty = qty_to_distribute if is_last else round(min(qty_to_distribute, avail_here), 4)
+                if take_qty <= 0:
+                    continue
+                rem_qty[pidx] = round(rem_qty[pidx] - take_qty, 4)
+                qty_to_distribute = round(qty_to_distribute - take_qty, 4)
+                splits.append((pool[pidx], s, use_unpack, chosen_pack, take_qty, eff_list_price, avail_here))
+            allocations_by_inv[inv_idx] = splits
+        else:
+            avail_before = round(max(rem_qty[best_pl_idx], 0.0), 4)
+            rem_qty[best_pl_idx] = round(rem_qty[best_pl_idx] - eff_total_qty, 4)
+            allocations_by_inv[inv_idx] = [(pool[best_pl_idx], best_s, use_unpack, chosen_pack, eff_total_qty, eff_list_price, avail_before)]
+
+    # 2. Construir salida respetando el orden del PDF y mostrando el saldo disponible en cada paso
     matched_out = []
+    out_idx = 0
     for inv_idx, inv_ln in enumerate(invoice_lines):
         billed_qty = float(inv_ln.get("billed_qty") or inv_ln.get("quantity") or 1.0)
         billed_price = float(inv_ln.get("billed_unit_price") or inv_ln.get("unit_price") or 0.0)
         disc_pct = round(float(inv_ln.get("discount_percentage") or 0.0), 2)
 
-        if inv_idx in assigned_inv:
-            best_pl, best_score, use_unpack, chosen_pack = assigned_inv[inv_idx]
-            eff_qty = round(billed_qty * chosen_pack, 4) if use_unpack else billed_qty
-            eff_list_price = round(billed_price / chosen_pack, 4) if (use_unpack and chosen_pack > 0) else billed_price
-            pl_eff_unit = round(float(best_pl["price_unit"] or 0.0) * (1.0 - float(best_pl.get("discount") or 0.0) / 100.0), 4)
+        if inv_idx in allocations_by_inv:
+            splits = allocations_by_inv[inv_idx]
+            was_split = len(splits) > 1
+            for best_pl, best_score, use_unpack, chosen_pack, alloc_qty, eff_list_price, avail_before in splits:
+                pl_eff_unit = round(float(best_pl["price_unit"] or 0.0) * (1.0 - float(best_pl.get("discount") or 0.0) / 100.0), 4)
+                line_tax_ids = best_pl["tax_ids"] if best_pl["tax_ids"] else ([fallback_vat["id"]] if fallback_vat else [])
+                line_tax_names = best_pl["tax_names"] if best_pl["tax_ids"] else fallback_lbl
+                prop_billed_qty = round(alloc_qty / chosen_pack, 4) if (use_unpack and chosen_pack > 0) else alloc_qty
 
-            line_tax_ids = best_pl["tax_ids"] if best_pl["tax_ids"] else ([fallback_vat["id"]] if fallback_vat else [])
-            line_tax_names = best_pl["tax_names"] if best_pl["tax_ids"] else fallback_lbl
-
-            matched_out.append({
-                **inv_ln,
-                "billed_qty": billed_qty,
-                "billed_unit_price": billed_price,
-                "can_unpack": bool(use_unpack and chosen_pack > 1.0),
-                "pack_size": chosen_pack,
-                "pack_applied": use_unpack,
-                "quantity": eff_qty,
-                "unit_price": eff_list_price,
-                "discount_percentage": disc_pct,
-                "line_net_total": round(eff_qty * eff_list_price * (1.0 - disc_pct / 100.0), 2),
-                "matched_po_line_id": best_pl["po_line_id"],
-                "matched_po_name": best_pl["po_name"],
-                "product_id": best_pl["product_id"],
-                "odoo_product_label": f"[{best_pl['default_code']}] {best_pl['product_name']}" if best_pl.get("default_code") else best_pl["product_name"],
-                "po_qty_pending": best_pl["qty_pending"],
-                "po_price_unit": best_pl["price_unit"],
-                "po_discount": best_pl["discount"],
-                "po_eff_unit_price": pl_eff_unit,
-                "tax_ids": line_tax_ids,
-                "tax_names": line_tax_names,
-                "match_confidence": round(min(best_score, 1.0) * 100),
-            })
+                matched_out.append({
+                    **inv_ln,
+                    "index": out_idx,
+                    "billed_qty": prop_billed_qty,
+                    "billed_unit_price": billed_price,
+                    "can_unpack": bool(use_unpack and chosen_pack > 1.0),
+                    "pack_size": chosen_pack if use_unpack else 1.0,
+                    "pack_applied": use_unpack,
+                    "auto_split": was_split,
+                    "quantity": alloc_qty,
+                    "unit_price": eff_list_price,
+                    "discount_percentage": disc_pct,
+                    "line_net_total": round(alloc_qty * eff_list_price * (1.0 - disc_pct / 100.0), 2),
+                    "matched_po_line_id": best_pl["po_line_id"],
+                    "matched_po_name": best_pl["po_name"],
+                    "product_id": best_pl["product_id"],
+                    "odoo_product_label": f"[{best_pl['default_code']}] {best_pl['product_name']}" if best_pl.get("default_code") else best_pl["product_name"],
+                    "po_qty_pending": avail_before,  # Saldo disponible de esa línea de OC al momento de imputar esta fila
+                    "po_line_total_pending": best_pl["qty_pending"],
+                    "po_price_unit": best_pl["price_unit"],
+                    "po_discount": best_pl["discount"],
+                    "po_eff_unit_price": pl_eff_unit,
+                    "tax_ids": line_tax_ids,
+                    "tax_names": line_tax_names,
+                    "match_confidence": round(min(max(best_score, 0.0), 1.0) * 100),
+                })
+                out_idx += 1
         else:
             matched_out.append({
                 **inv_ln,
+                "index": out_idx,
                 "billed_qty": billed_qty,
                 "billed_unit_price": billed_price,
-                "can_unpack": bool(float(inv_ln.get("pack_size") or 1.0) > 1.0),
+                "can_unpack": False,
+                "pack_size": 1.0,
+                "pack_applied": False,
                 "matched_po_line_id": None,
                 "matched_po_name": "",
                 "product_id": None,
                 "odoo_product_label": "",
                 "po_qty_pending": None,
+                "po_line_total_pending": None,
                 "po_price_unit": None,
                 "po_discount": None,
                 "po_eff_unit_price": None,
@@ -1820,6 +1917,7 @@ def auto_match_invoice_lines_to_pos(
                 "tax_names": fallback_lbl,
                 "match_confidence": 0,
             })
+            out_idx += 1
 
     return matched_out
 
